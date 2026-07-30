@@ -4305,8 +4305,9 @@ function PODocumentEditorPage(){
 // The live "Add user" button on the Users page still works day-to-day, but only
 // affects the browser that used it, not your teammates' browsers.
 const DEFAULT_USERS_SEED = [
-  { username:'admin', password:'ChangeThisPassword123', displayName:'Admin', role:'editor', isAdmin:true },
-  // { username:'teammate1', password:'AnotherPassword456', displayName:'Teammate One', role:'editor', isAdmin:false },
+  { username:'Admin', password:'12345', displayName:'Admin', role:'editor', isAdmin:true },
+  { username:'Globe', password:'12345', displayName:'Globe', role:'editor', isAdmin:false,
+    moduleAccess:{ dashboard:false, weeklyimport:false, forecast:false, firmorders:false, comparison:false, accessories:false, shipmentmgmt:false, shipmentperf:false, podocedit:true } },
 ];
 
 async function seedDefaultUsers(){
