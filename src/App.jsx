@@ -3472,6 +3472,8 @@ function Avatar({user, size}){
 function ProfileMenu({user, onSave, onClose}){
   const inputRef = React.useRef();
   const [busy,setBusy] = useState(false);
+  const LOGIN_BACKGROUNDS = ['/login-bg-1.jpg','/login-bg-2.jpg','/login-bg-3.jpg','/login-bg-4.jpg'];
+const [bgImg] = useState(()=> LOGIN_BACKGROUNDS[Math.floor(Math.random()*LOGIN_BACKGROUNDS.length)]);
   const [error,setError] = useState('');
   const pick = async (file)=>{
     if(!file) return;
@@ -3545,7 +3547,7 @@ function LoginScreen({users, onLogin, onCreateFirstAdmin}){
   };
 
   return (
-    <div className="login-wrap">
+   <div className="login-wrap" style={{backgroundImage:`url(${bgImg})`}}>
       <form className="login-card" onSubmit={submit}>
         <div className="login-logo">
           <img src={LOGO_DATA_URI} alt="EMBEE" />
