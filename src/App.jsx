@@ -3524,7 +3524,7 @@ function LoginScreen({users, onLogin, onCreateFirstAdmin}){
   const [confirmPw,setConfirmPw] = useState('');
   const [error,setError] = useState('');
   const [busy,setBusy] = useState(false);
-  const LOGIN_BACKGROUNDS = ['/login-bg-1.jpg','/login-bg-2.jpg','/login-bg-3.jpg','/login-bg-4.jpg'];
+  const LOGIN_BACKGROUNDS = ['/login-bg-1.jpg','/login-bg-4.jpg','/login-bg-5.jpg'];
   const [bgImg] = useState(()=> LOGIN_BACKGROUNDS[Math.floor(Math.random()*LOGIN_BACKGROUNDS.length)]);
 
   const submit = async (e)=>{
