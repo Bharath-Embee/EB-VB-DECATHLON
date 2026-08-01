@@ -286,7 +286,9 @@
   }
 
   /* ================= Auth ================= */
-  .login-wrap{min-height:100vh;width:100%;display:flex;align-items:center;justify-content:center;background:var(--bg);padding:20px;}
+  .login-wrap{min-height:100vh;width:100%;display:flex;align-items:center;justify-content:center;background-size:cover;background-position:center;position:relative;padding:20px;}
+.login-wrap::before{content:'';position:absolute;inset:0;background:rgba(10,18,32,.45);}
+.login-card{position:relative;z-index:1;}
   .login-card{width:100%;max-width:380px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:var(--shadow-lg);padding:28px 26px;}
   .login-logo{display:flex;align-items:center;gap:10px;margin-bottom:18px;}
   .login-logo img{width:38px;height:38px;border-radius:8px;object-fit:cover;}
