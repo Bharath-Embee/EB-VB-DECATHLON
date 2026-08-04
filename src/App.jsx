@@ -458,6 +458,10 @@ const SELECTION_MAPPING_FIELDS = [
   {key:'supplier', label:'Supplier', guess:['supplier']},
   {key:'department', label:'Department / Sport', guess:['department','sport']},
   {key:'selectionQty', label:'Selection Qty', guess:['selection qty','selection quantity']},
+  {key:'yarnSmtPct', label:'Yarn SMT %', guess:['smt yarn','yarn smt']},
+  {key:'fabricGreigeSmtPct', label:'Fabric Greige SMT %', guess:['smt greige','fabric greige smt','greige smt']},
+  {key:'fabricDyingSmtPct', label:'Fabric Dying SMT %', guess:['smt dyed','fabric dying smt','dying smt','smt dying']},
+  {key:'accSmtPct', label:'ACC. SMT %', guess:['smt accessories','acc smt','accessories smt']},
 ];
 function normSelHeader(h){ return String(h==null?'':h).trim().toLowerCase(); }
 function guessSelectionColumn(field, headers){
@@ -523,12 +527,15 @@ function parseSelectionRowsFromGrid(grid, sourceLabel, headerRowIdx, mapping){
     const keyRaw = (styleNoRaw!=null && String(styleNoRaw).trim()!=='') ? styleNoRaw : r3CodeRaw;
     if(keyRaw==null || String(keyRaw).trim()==='') continue;
     const str = v => v==null? '' : String(v).trim();
+    const num = v => v==null? 0 : Number(v)||0;
     rows.push({
       styleNo: str(keyRaw), r3Code: str(r3CodeRaw), description: str(get(row,'description')),
       cc: str(get(row,'cc')), brand: str(get(row,'brand')), buyer: str(get(row,'buyer')),
       color: str(get(row,'color')), factory: str(get(row,'factory')), country: str(get(row,'country')),
       company: str(get(row,'company')), supplier: str(get(row,'supplier')), department: str(get(row,'department')),
-      selectionQty: (()=>{ const v=get(row,'selectionQty'); return v==null? 0 : Number(v)||0; })(),
+      selectionQty: num(get(row,'selectionQty')),
+      yarnSmtPct: num(get(row,'yarnSmtPct')), fabricGreigeSmtPct: num(get(row,'fabricGreigeSmtPct')),
+      fabricDyingSmtPct: num(get(row,'fabricDyingSmtPct')), accSmtPct: num(get(row,'accSmtPct')),
     });
   }
   if(!rows.length) throw new Error('No rows found using this column mapping — check the Style Number / Iman Code and Selection Qty mappings.');
@@ -1178,6 +1185,7 @@ function blankStyleMeta(){
     brand:'', supplier:'', fabricSupplier:'', accessoriesSupplier:'', company:'', cc:'',
     smtCommitmentPct:0, fabricCommitmentQty:0, fabricOrderedQty:0,
     accCommitmentPct:0, accCommitmentQty:0,
+    yarnSmtPct:0, fabricGreigeSmtPct:0, fabricDyingSmtPct:0, accSmtPct:0,
     prevSeasonFgStock:0, productionCompletedQty:0, shipmentCompletedQty:0,
   };
 }
@@ -1554,6 +1562,88 @@ function exportToPDF(title, rows, filename){
     startY:20, styles:{fontSize:7}, headStyles:{fillColor:[4,102,175]},
   });
   doc.save(filename);
+}
+// Builds one Style#/Model/Colour header line + a Sizes-as-rows table + Total row, per group —
+// used for Demand Analysis' size-wise export, so the file matches what's on screen exactly
+// (unlike the flat one-row-per-group table the "Off — totals only" view exports).
+function sizeWiseBlockLines(g, groupByLabel){
+  if(g.styles.length===1){
+    const s = g.styles[0];
+    return [
+      `Style# ${s.styleNo}   Model: ${s.r3Code||'—'}   Colour: ${s.color||'—'}`,
+      `Selection Qty: ${fmt(s.selectionQty)} Pcs`,
+      `Yarn SMT%: ${s.yarnSmtPct}   Fabric Greige SMT%: ${s.fabricGreigeSmtPct}   Fabric Dying SMT%: ${s.fabricDyingSmtPct}   ACC. SMT%: ${s.accSmtPct}`,
+      `Total Commitment: ${fmt(Math.round(s.selectionQty * s.fabricDyingSmtPct/100))} Pcs`,
+    ];
+  }
+  return [`${groupByLabel}: ${g.key}   (${g.count} styles: ${g.styles.map(s=>s.styleNo).join(', ')})`];
+}
+function exportSizeWiseExcel(sizeWiseRows, metricKeys, groupByLabel, filename){
+  if(!sizeWiseRows.length){ alert('Nothing to export.'); return; }
+  const metricLabels = metricKeys.map(mk=>SIZE_WISE_METRICS.find(m=>m.key===mk).label);
+  const aoa = [];
+  sizeWiseRows.forEach(g=>{
+    sizeWiseBlockLines(g,groupByLabel).forEach(line=>aoa.push([line]));
+    aoa.push(['Sizes', ...metricLabels]);
+    SIZES.forEach(sz=>{ aoa.push([sz, ...metricKeys.map(mk=>g.metrics[mk][sz])]); });
+    aoa.push(['Total', ...metricKeys.map(mk=>sizeSum(g.metrics[mk]))]);
+    aoa.push([]);
+  });
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Demand Analysis'.slice(0,31));
+  XLSX.writeFile(wb, filename);
+}
+function exportSizeWiseCSV(sizeWiseRows, metricKeys, groupByLabel, filename){
+  if(!sizeWiseRows.length){ alert('Nothing to export.'); return; }
+  const metricLabels = metricKeys.map(mk=>SIZE_WISE_METRICS.find(m=>m.key===mk).label);
+  const esc = v=>{ const s = v==null? '' : String(v); return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; };
+  const lines = [];
+  sizeWiseRows.forEach(g=>{
+    sizeWiseBlockLines(g,groupByLabel).forEach(line=>lines.push(esc(line)));
+    lines.push(['Sizes',...metricLabels].map(esc).join(','));
+    SIZES.forEach(sz=>{ lines.push([sz,...metricKeys.map(mk=>g.metrics[mk][sz])].map(esc).join(',')); });
+    lines.push(['Total',...metricKeys.map(mk=>sizeSum(g.metrics[mk]))].map(esc).join(','));
+    lines.push('');
+  });
+  const blob = new Blob([lines.join('\n')],{type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download=filename; a.click();
+  URL.revokeObjectURL(url);
+}
+function exportSizeWisePDF(sizeWiseRows, metricKeys, groupByLabel, filename){
+  if(!sizeWiseRows.length){ alert('Nothing to export.'); return; }
+  const metricLabels = metricKeys.map(mk=>SIZE_WISE_METRICS.find(m=>m.key===mk).label);
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({orientation:'landscape'});
+  let y = 14;
+  doc.setFontSize(13); doc.text('Demand Analysis — Size-wise', 14, y); y += 8;
+  sizeWiseRows.forEach(g=>{
+    if(y>170){ doc.addPage(); y = 14; }
+    doc.setFontSize(9.5);
+    const headerLines = sizeWiseBlockLines(g,groupByLabel);
+    doc.text(headerLines, 14, y);
+    y += headerLines.length * 4.3 + 2;
+    const body = SIZES.map(sz=>[sz, ...metricKeys.map(mk=>fmt(g.metrics[mk][sz]))]);
+    body.push(['Total', ...metricKeys.map(mk=>fmt(sizeSum(g.metrics[mk])))]);
+    doc.autoTable({
+      head:[['Sizes', ...metricLabels]], body, startY:y, styles:{fontSize:7}, headStyles:{fillColor:[4,102,175]},
+      margin:{left:14,right:14},
+    });
+    y = doc.lastAutoTable.finalY + 10;
+  });
+  doc.save(filename);
+}
+function SizeWiseExportButtons({sizeWiseRows,metricKeys,groupByLabel}){
+  if(!sizeWiseRows || !sizeWiseRows.length) return null;
+  const stamp = new Date().toISOString().slice(0,10);
+  return (
+    <div style={{display:'flex',gap:6}}>
+      <button className="btn" onClick={()=>exportSizeWiseExcel(sizeWiseRows,metricKeys,groupByLabel,`demand-analysis-sizewise_${stamp}.xlsx`)}>Excel</button>
+      <button className="btn" onClick={()=>exportSizeWiseCSV(sizeWiseRows,metricKeys,groupByLabel,`demand-analysis-sizewise_${stamp}.csv`)}>CSV</button>
+      <button className="btn" onClick={()=>exportSizeWisePDF(sizeWiseRows,metricKeys,groupByLabel,`demand-analysis-sizewise_${stamp}.pdf`)}>PDF</button>
+    </div>
+  );
 }
 // One control that reports respect the currently selected filters — pass the already-filtered rows in.
 function ExportButtons({title,rows,baseFilename}){
@@ -2003,9 +2093,11 @@ function TaggedUploadDrop({label,hint,onFile,parsing,batches}){
 // ---------- Shipment Performance: UI ----------
 // The Shipment Details file carries no week column, so upload asks the user to confirm the
 // shipment week (defaults to the Tuesday of the current week, per the business rule) before parsing.
-function ShipmentDetailsUploadDrop({onFile,parsing}){
+function ShipmentDetailsUploadDrop({onFile,parsing,onSheetImport,parsingSheet,sheetError}){
   const inputRef = React.useRef();
   const [weekDate,setWeekDate] = useState(isoDateStr(tuesdayOfWeek(new Date())));
+  const [sheetUrl,setSheetUrl] = useState('');
+  const [sheetName,setSheetName] = useState('');
   return (
     <div>
       <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
@@ -2019,6 +2111,22 @@ function ShipmentDetailsUploadDrop({onFile,parsing}){
         }} />
         <div className="drop-title">{parsing? 'Parsing…' : 'Upload Shipment Details (weekly)'}</div>
         <div>Style#, PO#, Size, Total Cartons, Total PCS, Price USD/PC, Total Price in USD…</div>
+      </div>
+      <div style={{marginTop:12,paddingTop:12,borderTop:'1px dashed var(--border)'}}>
+        <div style={{fontSize:12,color:'var(--ink-soft)',marginBottom:6}}>…or paste a Google Sheet link instead of uploading a file</div>
+        <div style={{display:'flex',gap:8,marginBottom:8}}>
+          <input type="text" placeholder="https://docs.google.com/spreadsheets/d/…" value={sheetUrl}
+            onChange={e=>setSheetUrl(e.target.value)} style={{flex:1}} disabled={parsingSheet} />
+          <button className="btn" disabled={parsingSheet || !sheetUrl.trim()} onClick={()=>onSheetImport(sheetUrl.trim(), sheetName.trim(), new Date(weekDate+'T00:00:00'))}>
+            {parsingSheet? 'Importing…' : 'Import'}
+          </button>
+        </div>
+        <input type="text" placeholder="Specific tab name (optional). Leave blank to read every tab."
+          value={sheetName} onChange={e=>setSheetName(e.target.value)} disabled={parsingSheet} style={{width:'100%'}} />
+        <div style={{fontSize:11,color:'var(--ink-soft)',marginTop:5}}>
+          Sheet must be shared as "Anyone with the link can view". Imports against the shipment week selected above.
+        </div>
+        {sheetError && <div style={{fontSize:12,color:'var(--red)',marginTop:6}}>{sheetError}</div>}
       </div>
     </div>
   );
@@ -2245,11 +2353,52 @@ function ShipmentPerformanceRecordsTable({records}){
     </div>
   );
 }
-function ShipmentPerformancePage({planBatches,detailsBatches,onPlanUpload,parsingPlan,onDeletePlan,onDetailsUpload,parsingDetails,onDeleteDetails}){
+function ShipmentPlanRawTable({batch}){
+  const rows = batch.rows.slice(0,300);
+  return (
+    <table>
+      <thead><tr><th>Order Number</th><th>Iman/Model</th><th className="num">Ordered</th><th className="num">Shipped</th><th className="num">Delivered</th><th className="num">Remaining</th><th>CHD Week</th><th>CHD Date</th><th>EHD Week</th><th>Supplier</th></tr></thead>
+      <tbody>
+        {rows.map((r,i)=>(
+          <tr key={i}>
+            <td className="mono">{r.orderNumber}</td><td className="mono">{r.imanCode||r.model}</td>
+            <td className="num">{fmt(r.orderedQty)}</td><td className="num">{fmt(r.shippedQtyPlan)}</td>
+            <td className="num">{fmt(r.deliveredQty)}</td><td className="num">{fmt(r.remainingQtyPlan)}</td>
+            <td className="mono">{r.chdWeek}</td><td>{r.chdDate? new Date(r.chdDate).toLocaleDateString():'—'}</td>
+            <td className="mono">{r.ehdWeek}</td><td>{r.supplier}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+function ShipmentDetailsRawTable({batch}){
+  const rows = batch.rows.slice(0,300);
+  return (
+    <table>
+      <thead><tr><th>Style#</th><th>PO#</th><th>Size</th><th className="num">Cartons</th><th className="num">Total PCS</th><th className="num">Price USD/PC</th><th className="num">Total Price USD</th><th>Colour</th></tr></thead>
+      <tbody>
+        {rows.map((r,i)=>(
+          <tr key={i}>
+            <td className="mono">{r.styleNo}</td><td className="mono">{r.po}</td><td>{r.size}</td>
+            <td className="num">{fmt(r.totalCartons)}</td><td className="num">{fmt(r.totalPcs)}</td>
+            <td className="num">{n(r.priceUsdPc).toFixed(2)}</td><td className="num">{n(r.totalPriceUsd).toFixed(2)}</td>
+            <td>{r.garmentColor}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+function ShipmentPerformancePage({planBatches,detailsBatches,onPlanUpload,parsingPlan,onDeletePlan,onDetailsUpload,parsingDetails,onDeleteDetails,onDetailsSheetImport,parsingDetailsSheet,detailsSheetError}){
   const records = useMemo(()=>computeShipmentPerformanceRecords(planBatches,detailsBatches),[planBatches,detailsBatches]);
   const kpis = useMemo(()=>computeShipmentPerformanceKpis(records),[records]);
   const hotKpis = useMemo(()=>computeHotKpis(records),[records]);
   const hasData = planBatches.length>0 || detailsBatches.length>0;
+  const [viewPlanId,setViewPlanId] = useState('');
+  const [viewDetailsId,setViewDetailsId] = useState('');
+  const viewingPlan = planBatches.find(b=>b.id===viewPlanId) || planBatches[planBatches.length-1];
+  const viewingDetails = detailsBatches.find(b=>b.id===viewDetailsId) || detailsBatches[detailsBatches.length-1];
   return (
     <div>
       <div className="section">
@@ -2263,13 +2412,57 @@ function ShipmentPerformancePage({planBatches,detailsBatches,onPlanUpload,parsin
             </div>
             <div>
               <div className="acc-subhead">Data Source 2 — Shipment Details</div>
-              <ShipmentDetailsUploadDrop onFile={onDetailsUpload} parsing={parsingDetails} />
+              <ShipmentDetailsUploadDrop onFile={onDetailsUpload} parsing={parsingDetails}
+                onSheetImport={onDetailsSheetImport} parsingSheet={parsingDetailsSheet} sheetError={detailsSheetError} />
               <RevisionRibbon batches={detailsBatches} label="Shipment Details" onDelete={onDeleteDetails} />
             </div>
           </div>
-          <div className="foot-note">Matching: Iman Code ↔ STYLE#, Order Number ↔ PO#, Ordered Qty ↔ TTL NO PCS. Every Shipment Plan upload replaces prior figures per PO (latest revision wins); every Shipment Details upload adds that week's actuals on top of prior weeks for the same PO.</div>
+          <div className="foot-note">Matching: Iman Code ↔ STYLE#, Order Number ↔ PO#, Ordered Qty ↔ TTL NO PCS. Every Shipment Plan upload replaces prior figures per PO (latest revision wins); every Shipment Details upload adds that week's actuals on top of prior weeks for the same PO. <b>Use the ✕ on any chip above to delete an upload.</b></div>
         </div>
       </div>
+
+      {(viewingPlan || viewingDetails) && (
+        <div className="section">
+          <div className="section-head"><div className="section-title">View Uploaded Data</div></div>
+          <div className="section-body">
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:20}}>
+              {viewingPlan && (
+                <div>
+                  <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8,flexWrap:'wrap',gap:8}}>
+                    <div className="acc-subhead" style={{margin:0}}>Shipment Plan — {viewingPlan.weekLabel||viewingPlan.fileName}</div>
+                    <div style={{display:'flex',alignItems:'center',gap:8}}>
+                      <span className="badge-count">{viewingPlan.rowCount} lines</span>
+                      {planBatches.length>1 && (
+                        <select value={viewingPlan.id} onChange={e=>setViewPlanId(e.target.value)}>
+                          {planBatches.slice().reverse().map(b=><option key={b.id} value={b.id}>{b.weekLabel||b.fileName}{b.id===planBatches[planBatches.length-1].id?' (latest)':''}</option>)}
+                        </select>
+                      )}
+                    </div>
+                  </div>
+                  <div className="table-scroll" style={{maxHeight:420}}><ShipmentPlanRawTable batch={viewingPlan} /></div>
+                </div>
+              )}
+              {viewingDetails && (
+                <div>
+                  <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8,flexWrap:'wrap',gap:8}}>
+                    <div className="acc-subhead" style={{margin:0}}>Shipment Details — {viewingDetails.weekLabel}</div>
+                    <div style={{display:'flex',alignItems:'center',gap:8}}>
+                      <span className="badge-count">{viewingDetails.rowCount} lines</span>
+                      {detailsBatches.length>1 && (
+                        <select value={viewingDetails.id} onChange={e=>setViewDetailsId(e.target.value)}>
+                          {detailsBatches.slice().reverse().map(b=><option key={b.id} value={b.id}>{b.weekLabel} — {b.fileName}{b.id===detailsBatches[detailsBatches.length-1].id?' (latest)':''}</option>)}
+                        </select>
+                      )}
+                    </div>
+                  </div>
+                  <div className="table-scroll" style={{maxHeight:420}}><ShipmentDetailsRawTable batch={viewingDetails} /></div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {!hasData ? (
         <div className="section"><div className="empty"><b>No data yet.</b><br/>Upload this week's Shipment Plan and Shipment Details files above to generate HOT%, EHD reliability, and delay reports automatically.</div></div>
       ) : (
@@ -3114,12 +3307,31 @@ function AccessoriesRequirementPlaceholder(){
   );
 }
 
+function SelectionFileRawTable({batch}){
+  const rows = (batch.rows||[]).slice(0,300);
+  return (
+    <table>
+      <thead><tr><th>Style#</th><th>Iman/Model</th><th>Description</th><th>Colour</th><th>Factory</th><th>Country</th><th>Company</th><th>Supplier</th><th className="num">Selection Qty</th></tr></thead>
+      <tbody>
+        {rows.map((r,i)=>(
+          <tr key={i}>
+            <td className="mono">{r.styleNo}</td><td className="mono">{r.r3Code}</td><td>{r.description}</td>
+            <td>{r.color}</td><td>{r.factory}</td><td>{r.country}</td><td>{r.company}</td><td>{r.supplier}</td>
+            <td className="num">{fmt(r.selectionQty)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
 function SelectionFilePage({selectionBatches,onImport,parsingSelection,onDeleteSelection,savedMappings,seasonNames,fixedSeason}){
   const recentSeasons = useMemo(()=>{
     const set = new Set([...(seasonNames||[]), ...selectionBatches.map(b=>b.season).filter(Boolean)]);
     return Array.from(set);
   },[selectionBatches, seasonNames]);
   const visibleBatches = fixedSeason ? selectionBatches.filter(b=>b.season===fixedSeason) : selectionBatches;
+  const [viewId,setViewId] = useState('');
+  const viewing = visibleBatches.find(b=>b.id===viewId) || null;
   return (
     <div>
       {!fixedSeason && (
@@ -3150,7 +3362,12 @@ function SelectionFilePage({selectionBatches,onImport,parsingSelection,onDeleteS
                     <td>{new Date(b.uploadedAt).toLocaleString()}</td>
                     <td>{b.uploadedBy||'—'}</td>
                     <td>{b.remarks||'—'}</td>
-                    <td>
+                    <td style={{display:'flex',gap:6}}>
+                      {b.rows && b.rows.length>0 && (
+                        <button type="button" className="btn" style={{padding:'4px 9px',fontSize:11}} onClick={()=>setViewId(viewId===b.id?'':b.id)}>
+                          {viewId===b.id? 'Hide':'View'}
+                        </button>
+                      )}
                       <button className="icon-btn" title="Remove"
                         onClick={()=>{ if(window.confirm(`Remove this ${b.season||''} upload (${b.fileName})? This can't be undone.`)) onDeleteSelection(b.id); }}>✕</button>
                     </td>
@@ -3161,6 +3378,18 @@ function SelectionFilePage({selectionBatches,onImport,parsingSelection,onDeleteS
           )}
         </div>
       </div>
+
+      {viewing && (
+        <div className="section">
+          <div className="section-head">
+            <div className="section-title">Viewing — {viewing.season} v{viewing.version||1} ({viewing.fileName})</div>
+            <span className="badge-count">{viewing.rowCount} rows</span>
+          </div>
+          <div className="section-body table-scroll">
+            <SelectionFileRawTable batch={viewing} />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -3198,31 +3427,46 @@ function FabricShipmentEditor({shipments, onChange}){
   );
 }
 function FabricLineRow({line, expanded, onToggle, onUpdate, onDelete}){
-  const calc = computeFabricLineCalc(line);
-  const field = (f,v)=> onUpdate(line.id, {[f]:v});
+  const [draft,setDraft] = useState(line); // local edits only — nothing here touches saved data until Save is clicked
+  const [justSaved,setJustSaved] = useState(false);
+  const calc = computeFabricLineCalc(draft); // recomputed live from the draft
+  const dirty = JSON.stringify(draft) !== JSON.stringify(line);
+  const field = (f,v)=> setDraft(d=>({...d,[f]:v}));
+  const save = ()=>{
+    onUpdate(line.id, draft);
+    setJustSaved(true);
+    setTimeout(()=>setJustSaved(false), 1800);
+  };
+  const discard = ()=> setDraft(line);
   return (
     <React.Fragment>
       <tr>
         <td className="stickycol lbl" onClick={onToggle} style={{cursor:'pointer'}}>
           <span className="group-caret">{expanded?'▾':'▸'}</span>
-          <span className="mono" style={{fontWeight:700}}>{line.modelCode}</span><br/>
-          <span style={{fontSize:11,color:'var(--ink-soft)'}}>{line.modelName}</span>
+          <span className="mono" style={{fontWeight:700}}>{draft.modelCode}</span><br/>
+          <span style={{fontSize:11,color:'var(--ink-soft)'}}>{draft.modelName}</span>
+          <div style={{display:'flex',alignItems:'center',gap:5,marginTop:4}} onClick={e=>e.stopPropagation()}>
+            <button type="button" className={"btn"+(dirty?" primary":"")} disabled={!dirty} onClick={save} style={{padding:'3px 9px',fontSize:10.5}}>Save</button>
+            {dirty && <button type="button" className="btn" onClick={discard} style={{padding:'3px 8px',fontSize:10.5}}>Discard</button>}
+            {dirty && <span className="acc-kpi-badge amber" style={{fontSize:9.5}}>● Unsaved</span>}
+            {justSaved && !dirty && <span className="acc-kpi-badge green" style={{fontSize:9.5}}>✓ Saved</span>}
+          </div>
         </td>
-        <td className="lbl">{line.fabricPart}</td>
-        <td className="lbl">{line.cptName}<br/><span style={{fontSize:11,color:'var(--ink-faint)'}}>{line.cptColor}</span></td>
-        <td className="lbl">{line.supplier}</td>
-        <td><NumCell value={line.totalCommitment} onChange={v=>field('totalCommitment',v)} /></td>
-        <td><NumCell value={line.fabricSharing} onChange={v=>field('fabricSharing',v)} /></td>
+        <td className="lbl">{draft.fabricPart}</td>
+        <td className="lbl">{draft.cptName}<br/><span style={{fontSize:11,color:'var(--ink-faint)'}}>{draft.cptColor}</span></td>
+        <td className="lbl">{draft.supplier}</td>
+        <td><NumCell value={draft.totalCommitment} onChange={v=>field('totalCommitment',v)} /></td>
+        <td><NumCell value={draft.fabricSharing} onChange={v=>field('fabricSharing',v)} /></td>
         <td><NumCell value={calc.fgQtyAsPerSharing} editable={false} bold /></td>
-        <td><NumCell value={line.baseConsumption} onChange={v=>field('baseConsumption',v)} /></td>
-        <td><NumCell value={line.extraPct} onChange={v=>field('extraPct',v)} /></td>
+        <td><NumCell value={draft.baseConsumption} onChange={v=>field('baseConsumption',v)} /></td>
+        <td><NumCell value={draft.extraPct} onChange={v=>field('extraPct',v)} /></td>
         <td><NumCell value={Number(calc.consumptionWithExtra.toFixed(4))} editable={false} bold /></td>
-        <td><NumCell value={line.fabricStock} onChange={v=>field('fabricStock',v)} /></td>
-        <td><NumCell value={line.fgStockPcs} onChange={v=>field('fgStockPcs',v)} /></td>
+        <td><NumCell value={draft.fabricStock} onChange={v=>field('fabricStock',v)} /></td>
+        <td><NumCell value={draft.fgStockPcs} onChange={v=>field('fgStockPcs',v)} /></td>
         <td><NumCell value={Number(calc.totalFabricToBeOrdered.toFixed(2))} editable={false} bold /></td>
-        <td><NumCell value={line.totalFabricOrdered} onChange={v=>field('totalFabricOrdered',v)} /></td>
+        <td><NumCell value={draft.totalFabricOrdered} onChange={v=>field('totalFabricOrdered',v)} /></td>
         <td><NumCell value={Number(calc.totalPendingToOrder.toFixed(2))} editable={false} bold color={balColor(calc.totalPendingToOrder)} /></td>
-        <td><NumCell value={line.containerCapacity} onChange={v=>field('containerCapacity',v)} /></td>
+        <td><NumCell value={draft.containerCapacity} onChange={v=>field('containerCapacity',v)} /></td>
         <td><NumCell value={calc.estimatedContainers==null? 0 : Number(calc.estimatedContainers.toFixed(2))} editable={false} bold /></td>
         <td><NumCell value={calc.shippedQtyTotal} editable={false} /></td>
         <td><NumCell value={Number(calc.balanceToShip.toFixed(2))} editable={false} color={balColor(calc.balanceToShip)} /></td>
@@ -3232,16 +3476,17 @@ function FabricLineRow({line, expanded, onToggle, onUpdate, onDelete}){
         <tr>
           <td colSpan={19} style={{background:'var(--surface-alt)',padding:'12px 14px'}}>
             <div style={{display:'flex',gap:24,flexWrap:'wrap',marginBottom:10,fontSize:12}}>
-              <label>Brand <input type="text" value={line.brand} onChange={e=>field('brand',e.target.value)} style={{width:120}} /></label>
-              <label>CC <input type="text" value={line.cc} onChange={e=>field('cc',e.target.value)} style={{width:90}} /></label>
-              <label>Units <input type="text" value={line.units} onChange={e=>field('units',e.target.value)} style={{width:80}} /></label>
-              <label>Fabric Price <input type="number" value={line.fabricPrice} onChange={e=>field('fabricPrice',Number(e.target.value)||0)} style={{width:90}} /></label>
-              <label>Incoterm <input type="text" value={line.incoterm} onChange={e=>field('incoterm',e.target.value)} style={{width:90}} /></label>
-              <label>Internal PO# <input type="text" value={line.internalPo} onChange={e=>field('internalPo',e.target.value)} style={{width:110}} /></label>
-              <label>Requested EHD <input type="date" value={line.requestedEhd} onChange={e=>field('requestedEhd',e.target.value)} /></label>
+              <label>Brand <input type="text" value={draft.brand} onChange={e=>field('brand',e.target.value)} style={{width:120}} /></label>
+              <label>CC <input type="text" value={draft.cc} onChange={e=>field('cc',e.target.value)} style={{width:90}} /></label>
+              <label>Units <input type="text" value={draft.units} onChange={e=>field('units',e.target.value)} style={{width:80}} /></label>
+              <label>Fabric Price <input type="number" value={draft.fabricPrice} onChange={e=>field('fabricPrice',Number(e.target.value)||0)} style={{width:90}} /></label>
+              <label>Incoterm <input type="text" value={draft.incoterm} onChange={e=>field('incoterm',e.target.value)} style={{width:90}} /></label>
+              <label>Internal PO# <input type="text" value={draft.internalPo} onChange={e=>field('internalPo',e.target.value)} style={{width:110}} /></label>
+              <label>Requested EHD <input type="date" value={draft.requestedEhd} onChange={e=>field('requestedEhd',e.target.value)} /></label>
             </div>
             <div className="acc-subhead" style={{margin:'4px 0 8px'}}>Shipments</div>
-            <FabricShipmentEditor shipments={line.shipments||[]} onChange={sh=>field('shipments',sh)} />
+            <FabricShipmentEditor shipments={draft.shipments||[]} onChange={sh=>field('shipments',sh)} />
+            {dirty && <div className="foot-note" style={{color:'var(--amber)'}}>You have unsaved changes on this line — click Save in the left column to keep them.</div>}
           </td>
         </tr>
       )}
@@ -3945,6 +4190,68 @@ const DEMAND_GROUP_FIELDS = [
   {key:'supplier', label:'Supplier'},
   {key:'factory', label:'Factory'},
 ];
+// Lets any Demand Analysis grouping be broken down into S/M/L/XL/2XL/3XL/4XL columns for one
+// chosen metric at a time, instead of just a single rolled-up number — e.g. "Style, size-wise
+// Acc. Ordered Qty" shows exactly how many of each size are ordered per style.
+const SIZE_WISE_METRICS = [
+  {key:'', label:'Off — totals only'},
+  {key:'all', label:'All Metrics (every column, size-wise)'},
+  {key:'ordered', label:'Acc. Ordered Qty', color:'ordered'},
+  {key:'received', label:'PO Qty Received', color:'poQty'},
+  {key:'fgStock', label:'FG Stock', color:'fgStock'},
+  {key:'issued', label:'Order Issued to Fty', color:'issued'},
+  {key:'stockBalance', label:'Balance Acc. Stock', color:'stockBal'},
+  {key:'needToIssue', label:'Need to Issue', color:'needIssue'},
+];
+// Small self-contained draft editor for the 4 SMT% fields shown on a Demand Analysis
+// size-wise block header — edits stay local until Save is clicked, same pattern as StyleCard.
+function SmtHeaderBlock({styleInfo, onSave}){
+  const startDraft = {yarnSmtPct:styleInfo.yarnSmtPct, fabricGreigeSmtPct:styleInfo.fabricGreigeSmtPct, fabricDyingSmtPct:styleInfo.fabricDyingSmtPct, accSmtPct:styleInfo.accSmtPct};
+  const [draft,setDraft] = useState(startDraft);
+  const [justSaved,setJustSaved] = useState(false);
+  const dirty = draft.yarnSmtPct!==styleInfo.yarnSmtPct || draft.fabricGreigeSmtPct!==styleInfo.fabricGreigeSmtPct
+    || draft.fabricDyingSmtPct!==styleInfo.fabricDyingSmtPct || draft.accSmtPct!==styleInfo.accSmtPct;
+  const field = (f,v)=> setDraft(d=>({...d,[f]:v}));
+  const save = ()=>{ onSave(draft); setJustSaved(true); setTimeout(()=>setJustSaved(false),1800); };
+  const discard = ()=> setDraft({yarnSmtPct:styleInfo.yarnSmtPct, fabricGreigeSmtPct:styleInfo.fabricGreigeSmtPct, fabricDyingSmtPct:styleInfo.fabricDyingSmtPct, accSmtPct:styleInfo.accSmtPct});
+  return (
+    <div style={{display:'flex',flexDirection:'column',gap:6,fontSize:13}}>
+      <div>
+        <b>Style#</b> <span className="mono">{styleInfo.styleNo}</span>
+        <span style={{marginLeft:18}}><b>Model:</b> <span className="mono">{styleInfo.r3Code||'—'}</span></span>
+        <span style={{marginLeft:18}}><b>Colour:</b> {styleInfo.color||'—'}</span>
+      </div>
+      <div><b>Selection Qty:</b> <span className="mono">{fmt(styleInfo.selectionQty)}</span> Pcs</div>
+      <div style={{display:'flex',alignItems:'center',flexWrap:'wrap',gap:'6px 22px'}}>
+        <span><b>Yarn SMT%:</b>{' '}
+          <input type="number" className="mono" value={draft.yarnSmtPct} onFocus={e=>e.target.select()}
+            onChange={e=>field('yarnSmtPct',Number(e.target.value)||0)}
+            style={{width:58,fontWeight:700,border:'1px solid var(--border)',borderRadius:4,padding:'2px 5px'}} />
+        </span>
+        <span><b>Fabric Greige SMT%:</b>{' '}
+          <input type="number" className="mono" value={draft.fabricGreigeSmtPct} onFocus={e=>e.target.select()}
+            onChange={e=>field('fabricGreigeSmtPct',Number(e.target.value)||0)}
+            style={{width:58,fontWeight:700,border:'1px solid var(--border)',borderRadius:4,padding:'2px 5px'}} />
+        </span>
+        <span><b>Fabric Dying SMT%:</b>{' '}
+          <input type="number" className="mono" value={draft.fabricDyingSmtPct} onFocus={e=>e.target.select()}
+            onChange={e=>field('fabricDyingSmtPct',Number(e.target.value)||0)}
+            style={{width:58,fontWeight:700,border:'1px solid var(--border)',borderRadius:4,padding:'2px 5px'}} />
+        </span>
+        <span><b>ACC. SMT%:</b>{' '}
+          <input type="number" className="mono" value={draft.accSmtPct} onFocus={e=>e.target.select()}
+            onChange={e=>field('accSmtPct',Number(e.target.value)||0)}
+            style={{width:58,fontWeight:700,border:'1px solid var(--border)',borderRadius:4,padding:'2px 5px'}} />
+        </span>
+        <button type="button" className={"btn"+(dirty?" primary":"")} disabled={!dirty} onClick={save} style={{padding:'3px 10px',fontSize:11}}>Save</button>
+        {dirty && <button type="button" className="btn" onClick={discard} style={{padding:'3px 8px',fontSize:11}}>Discard</button>}
+        {dirty && <span className="acc-kpi-badge amber">● Unsaved</span>}
+        {justSaved && !dirty && <span className="acc-kpi-badge green">✓ Saved</span>}
+      </div>
+      <div><b>Total Commitment:</b> <span className="mono" style={{fontWeight:700}}>{fmt(Math.round(styleInfo.selectionQty * draft.fabricDyingSmtPct/100))}</span> Pcs</div>
+    </div>
+  );
+}
 function AccessoriesPage({styles,setStyles,firmOrderBatches,shipmentBatches,seasonFilter}){
   const [query,setQuery] = useState('');
   const [openId,setOpenId] = useState(styles[0]? styles[0].id : null);
@@ -3952,6 +4259,7 @@ function AccessoriesPage({styles,setStyles,firmOrderBatches,shipmentBatches,seas
   const [sortDir,setSortDir] = useState('asc');
   const [viewMode,setViewMode] = useState('cards'); // 'cards' | 'analysis'
   const [groupBy,setGroupBy] = useState('styleNo');
+  const [sizeWiseMetric,setSizeWiseMetric] = useState('');
 
   const updateStyle = useCallback((id,updater)=>{
     setStyles(prev=>{
@@ -4018,11 +4326,58 @@ function AccessoriesPage({styles,setStyles,firmOrderBatches,shipmentBatches,seas
     return Object.values(map).sort((a,b)=>b.selectionQty-a.selectionQty);
   },[enriched,groupBy]);
 
-  const analysisExportRows = groupedRows.map(g=>({
-    [DEMAND_GROUP_FIELDS.find(f=>f.key===groupBy).label]: g.key, 'Styles':g.count, 'Selection Qty':g.selectionQty,
-    'Acc. Ordered Qty':g.ordered, 'PO Qty Received':g.received, 'FG Stock':g.fgStock, 'Order Issued to Fty':g.issued,
-    'Balance Acc. Stock':g.stockBalance, 'Need to Issue':g.needToIssue, 'Balance to Order':g.balanceToOrder,
-  }));
+  // Same grouping as above, but broken into S/M/L/XL/2XL/3XL/4XL columns for one metric at a
+  // time instead of a single rolled-up number.
+  const sizeWiseSource = (style,calc,metric)=>{
+    if(metric==='ordered') return calc.orderedTotal;
+    if(metric==='received') return calc.receivedTotal;
+    if(metric==='fgStock') return style.fgStock;
+    if(metric==='issued') return calc.issuedTotal;
+    if(metric==='stockBalance') return calc.balanceAccStock;
+    if(metric==='needToIssue') return calc.needToIssue;
+    return null;
+  };
+  const activeSizeWiseMetricKeys = useMemo(()=>{
+    if(!sizeWiseMetric) return [];
+    if(sizeWiseMetric==='all') return SIZE_WISE_METRICS.filter(m=>m.key && m.key!=='all').map(m=>m.key);
+    return [sizeWiseMetric];
+  },[sizeWiseMetric]);
+  const sizeWiseRows = useMemo(()=>{
+    if(!activeSizeWiseMetricKeys.length) return [];
+    const map = {};
+    enriched.forEach(({style,calc})=>{
+      const key = groupBy==='all' ? 'All Styles Combined' : (style[groupBy] || 'Unspecified');
+      if(!map[key]){
+        map[key] = {key, count:0, metrics:{}, styles:[]};
+        activeSizeWiseMetricKeys.forEach(mk=>{ map[key].metrics[mk] = zeroSizes(); });
+      }
+      map[key].count++;
+      map[key].styles.push({id:style.id, styleNo:style.styleNo, r3Code:style.r3Code, color:style.color, selectionQty:n(style.selectionQty),
+        yarnSmtPct:n(style.yarnSmtPct), fabricGreigeSmtPct:n(style.fabricGreigeSmtPct), fabricDyingSmtPct:n(style.fabricDyingSmtPct), accSmtPct:n(style.accSmtPct)});
+      activeSizeWiseMetricKeys.forEach(mk=>{
+        const sizeObj = sizeWiseSource(style,calc,mk) || zeroSizes();
+        SIZES.forEach(sz=>{ map[key].metrics[mk][sz] += n(sizeObj[sz]); });
+      });
+    });
+    const firstMetric = activeSizeWiseMetricKeys[0];
+    return Object.values(map).sort((a,b)=>sizeSum(b.metrics[firstMetric])-sizeSum(a.metrics[firstMetric]));
+  },[enriched,groupBy,activeSizeWiseMetricKeys]);
+
+  const analysisExportRows = sizeWiseMetric
+    ? sizeWiseRows.map(g=>{
+        const row = {[DEMAND_GROUP_FIELDS.find(f=>f.key===groupBy).label]: g.key, 'Styles':g.count};
+        activeSizeWiseMetricKeys.forEach(mk=>{
+          const mLabel = SIZE_WISE_METRICS.find(m=>m.key===mk).label;
+          SIZES.forEach(sz=>{ row[mLabel+' — '+sz] = g.metrics[mk][sz]; });
+          row[mLabel+' — Total'] = sizeSum(g.metrics[mk]);
+        });
+        return row;
+      })
+    : groupedRows.map(g=>({
+        [DEMAND_GROUP_FIELDS.find(f=>f.key===groupBy).label]: g.key, 'Styles':g.count, 'Selection Qty':g.selectionQty,
+        'Acc. Ordered Qty':g.ordered, 'PO Qty Received':g.received, 'FG Stock':g.fgStock, 'Order Issued to Fty':g.issued,
+        'Balance Acc. Stock':g.stockBalance, 'Need to Issue':g.needToIssue, 'Balance to Order':g.balanceToOrder,
+      }));
 
   const exportRows = sorted.map(({style,calc,summary})=>({
     'Style No':style.styleNo, Description:style.description, Season:style.season, Factory:style.factory, Supplier:style.supplier,
@@ -4051,20 +4406,84 @@ function AccessoriesPage({styles,setStyles,firmOrderBatches,shipmentBatches,seas
             <button className="btn primary add-style-btn" onClick={addStyle}><Icon name="plus" size={14}/> Add style</button>
           </React.Fragment>
         ) : (
-          <select value={groupBy} onChange={e=>setGroupBy(e.target.value)} title="Group by">
-            {DEMAND_GROUP_FIELDS.map(f=><option key={f.key} value={f.key}>Group by {f.label}</option>)}
-          </select>
+          <React.Fragment>
+            <select value={groupBy} onChange={e=>setGroupBy(e.target.value)} title="Group by">
+              {DEMAND_GROUP_FIELDS.map(f=><option key={f.key} value={f.key}>Group by {f.label}</option>)}
+            </select>
+            <select value={sizeWiseMetric} onChange={e=>setSizeWiseMetric(e.target.value)} title="Size-wise breakdown">
+              {SIZE_WISE_METRICS.map(m=><option key={m.key} value={m.key}>{m.key? 'Size-wise: '+m.label : m.label}</option>)}
+            </select>
+          </React.Fragment>
         )}
         <span className="badge-count">{sorted.length} style{sorted.length!==1?'s':''}</span>
         <span style={{flex:1}}></span>
-        <ExportButtons title={viewMode==='cards'?'Order Management':'Demand Analysis'} baseFilename={viewMode==='cards'?'order-management':'demand-analysis'} rows={viewMode==='cards'?exportRows:analysisExportRows} />
+        {sizeWiseMetric
+          ? <SizeWiseExportButtons sizeWiseRows={sizeWiseRows} metricKeys={activeSizeWiseMetricKeys} groupByLabel={DEMAND_GROUP_FIELDS.find(f=>f.key===groupBy).label} />
+          : <ExportButtons title={viewMode==='cards'?'Order Management':'Demand Analysis'} baseFilename={viewMode==='cards'?'order-management':'demand-analysis'} rows={viewMode==='cards'?exportRows:analysisExportRows} />
+        }
       </div>
 
       {viewMode==='analysis' ? (
         <div className="section">
-          <div className="section-head"><div className="section-title">Demand Analysis — {DEMAND_GROUP_FIELDS.find(f=>f.key===groupBy).label}</div></div>
+          <div className="section-head">
+            <div className="section-title">
+              Demand Analysis — {DEMAND_GROUP_FIELDS.find(f=>f.key===groupBy).label}
+              {sizeWiseMetric && <span style={{color:'var(--ink-faint)',fontWeight:500}}> · {SIZE_WISE_METRICS.find(m=>m.key===sizeWiseMetric).label}, size-wise</span>}
+            </div>
+          </div>
           <div className="section-body table-scroll">
-            {!groupedRows.length ? <div className="empty">No styles match this search.</div> : (
+            {sizeWiseMetric ? (
+              !sizeWiseRows.length ? <div className="empty">No styles match this search.</div> : (
+                <div style={{display:'flex',flexDirection:'column',gap:16}}>
+                  {sizeWiseRows.map(g=>(
+                    <div key={g.key} style={{border:'1px solid var(--border)',borderRadius:'var(--radius)',overflow:'hidden'}}>
+                      <div style={{padding:'12px 14px',background:'var(--surface-alt)',borderBottom:'1px solid var(--border)'}}>
+                        {g.styles.length===1 ? (
+                          <SmtHeaderBlock styleInfo={g.styles[0]} onSave={patch=>updateStyle(g.styles[0].id, st=>({...st,...patch}))} />
+                        ) : (
+                          <React.Fragment>
+                            <span className="mono" style={{fontWeight:700,fontSize:13}}>{g.key}</span>
+                            <span className="badge-count" style={{marginLeft:12}}>{g.count} styles</span>
+                            <span style={{fontSize:11.5,color:'var(--ink-faint)',marginLeft:12}}>{g.styles.map(s=>s.styleNo).join(', ')}</span>
+                          </React.Fragment>
+                        )}
+                      </div>
+                      <div className="table-scroll">
+                        <table className="grid-table" style={{margin:0}}>
+                          <thead>
+                            <tr>
+                              <th className="stickycol lbl">Sizes</th>
+                              {activeSizeWiseMetricKeys.map(mk=>{
+                                const m = SIZE_WISE_METRICS.find(mm=>mm.key===mk);
+                                return <th key={mk} style={{background:ORDER_MGMT_COLORS[m.color].head}}>{m.label}</th>;
+                              })}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {SIZES.map(sz=>(
+                              <tr key={sz}>
+                                <td className="stickycol lbl">{sz}</td>
+                                {activeSizeWiseMetricKeys.map(mk=>{
+                                  const m = SIZE_WISE_METRICS.find(mm=>mm.key===mk);
+                                  return <td key={mk} style={{background:ORDER_MGMT_COLORS[m.color].bg}}>{fmt(g.metrics[mk][sz])}</td>;
+                                })}
+                              </tr>
+                            ))}
+                            <tr className="grid-total-row">
+                              <td className="stickycol lbl">Total</td>
+                              {activeSizeWiseMetricKeys.map(mk=>{
+                                const m = SIZE_WISE_METRICS.find(mm=>mm.key===mk);
+                                return <td key={mk} style={{background:ORDER_MGMT_COLORS[m.color].head,fontWeight:700}}>{fmt(sizeSum(g.metrics[mk]))}</td>;
+                              })}
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )
+            ) : !groupedRows.length ? <div className="empty">No styles match this search.</div> : (
               <table className="grid-table">
                 <thead>
                   <tr>
@@ -4099,14 +4518,14 @@ function AccessoriesPage({styles,setStyles,firmOrderBatches,shipmentBatches,seas
               </table>
             )}
           </div>
-          <div className="foot-note" style={{padding:'0 19px 16px'}}>Same figures as the Style Cards view, rolled up by {DEMAND_GROUP_FIELDS.find(f=>f.key===groupBy).label.toLowerCase()} — switch grouping any time, nothing here is recalculated differently.</div>
+          <div className="foot-note" style={{padding:'0 19px 16px'}}>Same figures as the Style Cards view, rolled up by {DEMAND_GROUP_FIELDS.find(f=>f.key===groupBy).label.toLowerCase()} — switch grouping or size-wise breakdown any time, nothing here is recalculated differently.</div>
         </div>
       ) : (
         <React.Fragment>
           {sorted.length===0 && <div className="empty">No styles yet. <b>Add a style</b> to start planning accessories.</div>}
 
           {sorted.map(({style:st,calc,summary})=>(
-            <StyleCard key={st.id} style={st} calc={calc} status={summary.status} open={openId===st.id}
+            <StyleCard key={st.id} style={st} status={summary.status} open={openId===st.id}
               onToggle={()=>setOpenId(openId===st.id? null : st.id)}
               onUpdate={updater=>updateStyle(st.id,updater)}
               onDelete={()=>deleteStyle(st.id)} />
@@ -4131,18 +4550,23 @@ const ORDER_MGMT_COLORS = {
   stockBal:  {bg:'rgba(8,145,178,.26)',  head:'rgba(8,145,178,.52)'},   // Balance Acc. Stock — cyan
   needIssue: {bg:'rgba(220,38,38,.22)',  head:'rgba(220,38,38,.46)'},   // Need to Issue / Balance to Produce — rose
 };
-function StyleCard({style,calc,status,open,onToggle,onUpdate,onDelete}){
+function StyleCard({style,status,open,onToggle,onUpdate,onDelete}){
+  const [draft,setDraft] = useState(style); // local edits only — nothing here touches saved data until Save is clicked
   const [uploadState,setUploadState] = useState({busy:false,error:null,info:null});
-  const field = (f,v)=> onUpdate(st=>({...st,[f]:v}));
-  const setWeekQty = (weekId,size,val)=> onUpdate(st=>({...st,weeks:st.weeks.map(w=>w.id===weekId?{...w,qty:{...w.qty,[size]:val}}:w)}));
-  const setWeekLabel = (weekId,val)=> onUpdate(st=>({...st,weeks:st.weeks.map(w=>w.id===weekId?{...w,label:val}:w)}));
-  const addWeek = ()=> onUpdate(st=>({...st,weeks:[...st.weeks,{id:'wk_'+Date.now(),label:'WK'+(st.weeks.length+1),qty:zeroSizes()}]}));
-  const removeWeek = (weekId)=> onUpdate(st=>({...st,weeks:st.weeks.filter(w=>w.id!==weekId)}));
+  const [justSaved,setJustSaved] = useState(false);
+  const calc = computeStyleCalc(draft); // recomputed live from the draft, so totals update as you type, before saving
+  const dirty = JSON.stringify(draft) !== JSON.stringify(style);
 
-  const setPoField = (poId,f,val)=> onUpdate(st=>({...st,pos:st.pos.map(p=>p.id===poId?{...p,[f]:val}:p)}));
-  const setPoReceived = (poId,size,val)=> onUpdate(st=>({...st,pos:st.pos.map(p=>p.id===poId?{...p,received:{...p.received,[size]:val}}:p)}));
-  const addPo = ()=> onUpdate(st=>({...st,pos:[...st.pos,{id:'po_'+Date.now(),poNumber:'',deliveredThird:'',ehd:'',garmentOrderQty:0,received:zeroSizes()}]}));
-  const removePo = (poId)=> onUpdate(st=>({...st,pos:st.pos.filter(p=>p.id!==poId)}));
+  const field = (f,v)=> setDraft(st=>({...st,[f]:v}));
+  const setWeekQty = (weekId,size,val)=> setDraft(st=>({...st,weeks:st.weeks.map(w=>w.id===weekId?{...w,qty:{...w.qty,[size]:val}}:w)}));
+  const setWeekLabel = (weekId,val)=> setDraft(st=>({...st,weeks:st.weeks.map(w=>w.id===weekId?{...w,label:val}:w)}));
+  const addWeek = ()=> setDraft(st=>({...st,weeks:[...st.weeks,{id:'wk_'+Date.now(),label:'WK'+(st.weeks.length+1),qty:zeroSizes()}]}));
+  const removeWeek = (weekId)=> setDraft(st=>({...st,weeks:st.weeks.filter(w=>w.id!==weekId)}));
+
+  const setPoField = (poId,f,val)=> setDraft(st=>({...st,pos:st.pos.map(p=>p.id===poId?{...p,[f]:val}:p)}));
+  const setPoReceived = (poId,size,val)=> setDraft(st=>({...st,pos:st.pos.map(p=>p.id===poId?{...p,received:{...p.received,[size]:val}}:p)}));
+  const addPo = ()=> setDraft(st=>({...st,pos:[...st.pos,{id:'po_'+Date.now(),poNumber:'',deliveredThird:'',ehd:'',garmentOrderQty:0,received:zeroSizes()}]}));
+  const removePo = (poId)=> setDraft(st=>({...st,pos:st.pos.filter(p=>p.id!==poId)}));
 
   const handlePoFile = async (file)=>{
     setUploadState({busy:true,error:null,info:null});
@@ -4151,7 +4575,7 @@ function StyleCard({style,calc,status,open,onToggle,onUpdate,onDelete}){
       const wb = XLSX.read(buf,{type:'array', cellDates:true});
       const rows = parsePOUploadWorkbook(wb);
       let added=0, updated=0;
-      onUpdate(st=>{
+      setDraft(st=>{
         const pos = [...st.pos];
         rows.forEach((r,i)=>{
           const idx = pos.findIndex(p=>p.poNumber && p.poNumber===r.poNumber);
@@ -4167,29 +4591,40 @@ function StyleCard({style,calc,status,open,onToggle,onUpdate,onDelete}){
         });
         return {...st,pos};
       });
-      setUploadState({busy:false,error:null,info:`${added} PO${added!==1?'s':''} added, ${updated} updated from ${file.name}.`});
+      setUploadState({busy:false,error:null,info:`${added} PO${added!==1?'s':''} added, ${updated} updated from ${file.name} — click Save to keep this.`});
     }catch(e){
       setUploadState({busy:false,error:e.message,info:null});
     }
   };
 
-  const setFgStock = (size,val)=> onUpdate(st=>({...st,fgStock:{...st.fgStock,[size]:val}}));
+  const setFgStock = (size,val)=> setDraft(st=>({...st,fgStock:{...st.fgStock,[size]:val}}));
 
-  const setIssueQty = (isId,size,val)=> onUpdate(st=>({...st,issues:st.issues.map(is=>is.id===isId?{...is,qty:{...is.qty,[size]:val}}:is)}));
-  const setIssueLabel = (isId,val)=> onUpdate(st=>({...st,issues:st.issues.map(is=>is.id===isId?{...is,label:val}:is)}));
-  const addIssue = ()=> onUpdate(st=>({...st,issues:[...st.issues,{id:'is_'+Date.now(),label:'Order '+(st.issues.length+1),qty:zeroSizes()}]}));
-  const removeIssue = (isId)=> onUpdate(st=>({...st,issues:st.issues.filter(is=>is.id!==isId)}));
+  const setIssueQty = (isId,size,val)=> setDraft(st=>({...st,issues:st.issues.map(is=>is.id===isId?{...is,qty:{...is.qty,[size]:val}}:is)}));
+  const setIssueLabel = (isId,val)=> setDraft(st=>({...st,issues:st.issues.map(is=>is.id===isId?{...is,label:val}:is)}));
+  const addIssue = ()=> setDraft(st=>({...st,issues:[...st.issues,{id:'is_'+Date.now(),label:'Order '+(st.issues.length+1),qty:zeroSizes()}]}));
+  const removeIssue = (isId)=> setDraft(st=>({...st,issues:st.issues.filter(is=>is.id!==isId)}));
+
+  const save = ()=>{
+    onUpdate(()=>draft);
+    setJustSaved(true);
+    setTimeout(()=>setJustSaved(false), 1800);
+  };
+  const discard = ()=> setDraft(style);
 
   return (
     <div className={"acc-card"+(open?" open":"")}>
       <div className="acc-card-head" onClick={onToggle}>
         <span className="acc-caret">▶</span>
-        <input className="acc-style-no-input" value={style.styleNo} onClick={e=>e.stopPropagation()} onChange={e=>field('styleNo',e.target.value)} />
-        <input className="acc-style-desc-input" value={style.description} onClick={e=>e.stopPropagation()} onChange={e=>field('description',e.target.value)} placeholder="Style description" />
+        <input className="acc-style-no-input" value={draft.styleNo} onClick={e=>e.stopPropagation()} onChange={e=>field('styleNo',e.target.value)} />
+        <input className="acc-style-desc-input" value={draft.description} onClick={e=>e.stopPropagation()} onChange={e=>field('description',e.target.value)} placeholder="Style description" />
         {status && <PlanningStatusPill status={status} />}
         <span className="acc-kpi-badge">Commit {(calc.kpi.pctOrdered*100).toFixed(1)}%</span>
         <span className={"acc-kpi-badge "+(calc.kpi.accBalanceToOrderKpi<0?'red':'green')}>Bal. to order {fmt(calc.kpi.accBalanceToOrderKpi)}</span>
         <span className={"acc-kpi-badge "+(calc.totals.needToIssue>0?'red':'green')}>Need to issue {fmt(calc.totals.needToIssue)}</span>
+        {dirty && <span className="acc-kpi-badge amber" title="Unsaved changes — click Save to keep them">● Unsaved</span>}
+        {justSaved && !dirty && <span className="acc-kpi-badge green">✓ Saved</span>}
+        <button type="button" className={"btn"+(dirty?" primary":"")} disabled={!dirty} onClick={e=>{e.stopPropagation(); save();}} style={{padding:'4px 12px',fontSize:11.5}}>Save</button>
+        {dirty && <button type="button" className="btn" onClick={e=>{e.stopPropagation(); discard();}} style={{padding:'4px 10px',fontSize:11.5}}>Discard</button>}
         <button className="icon-btn" onClick={e=>{e.stopPropagation();onDelete();}} title="Remove style">✕</button>
       </div>
 
@@ -4205,12 +4640,12 @@ function StyleCard({style,calc,status,open,onToggle,onUpdate,onDelete}){
           </div>
           {uploadState.error && <div className="foot-note" style={{color:'var(--red)',marginTop:0}}>{uploadState.error}</div>}
           {uploadState.info && <div className="foot-note" style={{color:'var(--green)',marginTop:0}}>{uploadState.info}</div>}
-          <div className="foot-note" style={{marginTop:0,marginBottom:10}}>Upload expects columns: <span className="mono">PO Number, Delivered Third, EHD, Garment Order Qty</span>, then one column per size (<span className="mono">S, M, L, XL, 2XL, 3XL, 4XL</span>). Matching PO numbers update in place; new ones are added.</div>
+          <div className="foot-note" style={{marginTop:0,marginBottom:10}}>Upload expects columns: <span className="mono">PO Number, Delivered Third, EHD, Garment Order Qty</span>, then one column per size (<span className="mono">S, M, L, XL, 2XL, 3XL, 4XL</span>). Matching PO numbers update in place; new ones are added. <b>Nothing here saves until you click Save above.</b></div>
           <div className="table-scroll">
             <table className="po-mini-table">
               <thead><tr><th className="lbl">PO#</th><th className="lbl">Delivered Third</th><th className="lbl">EHD</th><th>Garment Order Qty</th><th></th></tr></thead>
               <tbody>
-                {style.pos.map(p=>(
+                {draft.pos.map(p=>(
                   <tr key={p.id}>
                     <td><input type="text" value={p.poNumber} onChange={e=>setPoField(p.id,'poNumber',e.target.value)} placeholder="PO number" /></td>
                     <td><input type="text" value={p.deliveredThird} onChange={e=>setPoField(p.id,'deliveredThird',e.target.value)} placeholder="Third party" /></td>
@@ -4219,7 +4654,7 @@ function StyleCard({style,calc,status,open,onToggle,onUpdate,onDelete}){
                     <td><button className="icon-btn" onClick={()=>removePo(p.id)}>✕</button></td>
                   </tr>
                 ))}
-                {style.pos.length===0 && <tr><td colSpan="5" className="empty" style={{padding:'12px'}}>No POs yet — add one, and it becomes an Orders-Received column below automatically.</td></tr>}
+                {draft.pos.length===0 && <tr><td colSpan="5" className="empty" style={{padding:'12px'}}>No POs yet — add one, and it becomes an Orders-Received column below automatically.</td></tr>}
               </tbody>
             </table>
           </div>
@@ -4233,15 +4668,15 @@ function StyleCard({style,calc,status,open,onToggle,onUpdate,onDelete}){
               <thead>
                 <tr>
                   <th className="stickycol lbl">Size</th>
-                  {style.weeks.map(w=>(
+                  {draft.weeks.map(w=>(
                     <th key={w.id} style={{background:ORDER_MGMT_COLORS.ordered.head}}>
                       <input className="col-head-label" value={w.label} onChange={e=>setWeekLabel(w.id,e.target.value)} />
-                      {style.weeks.length>1 && <span className="icon-btn" onClick={()=>removeWeek(w.id)} style={{marginLeft:2}}>✕</span>}
+                      {draft.weeks.length>1 && <span className="icon-btn" onClick={()=>removeWeek(w.id)} style={{marginLeft:2}}>✕</span>}
                     </th>
                   ))}
                   <th style={{background:ORDER_MGMT_COLORS.ordered.head}}>Total Ordered</th>
                   <th className="col-divider"></th>
-                  {style.pos.map(p=>(<th key={p.id} style={{background:ORDER_MGMT_COLORS.poQty.head}}>{p.poNumber||'PO'}</th>))}
+                  {draft.pos.map(p=>(<th key={p.id} style={{background:ORDER_MGMT_COLORS.poQty.head}}>{p.poNumber||'PO'}</th>))}
                   <th style={{background:ORDER_MGMT_COLORS.poQty.head}}>Total Received</th>
                   <th>Balance to Order</th>
                   <th style={{background:ORDER_MGMT_COLORS.fgStock.head}}>FG Stock</th>
@@ -4251,25 +4686,25 @@ function StyleCard({style,calc,status,open,onToggle,onUpdate,onDelete}){
                 {SIZES.map(size=>(
                   <tr key={size}>
                     <td className="stickycol">{size}</td>
-                    {style.weeks.map(w=>(
+                    {draft.weeks.map(w=>(
                       <td key={w.id}><NumCell value={w.qty[size]} onChange={val=>setWeekQty(w.id,size,val)} bg={ORDER_MGMT_COLORS.ordered.bg} /></td>
                     ))}
                     <td><NumCell value={calc.orderedTotal[size]} editable={false} bold bg={ORDER_MGMT_COLORS.ordered.bg} /></td>
                     <td className="col-divider"></td>
-                    {style.pos.map(p=>(
+                    {draft.pos.map(p=>(
                       <td key={p.id}><NumCell value={p.received[size]} onChange={val=>setPoReceived(p.id,size,val)} bg={ORDER_MGMT_COLORS.poQty.bg} /></td>
                     ))}
                     <td><NumCell value={calc.receivedTotal[size]} editable={false} bold bg={ORDER_MGMT_COLORS.poQty.bg} /></td>
                     <td><NumCell value={calc.balanceToOrder[size]} editable={false} bold color={balColor(calc.balanceToOrder[size])} /></td>
-                    <td><NumCell value={style.fgStock[size]} onChange={val=>setFgStock(size,val)} bg={ORDER_MGMT_COLORS.fgStock.bg} /></td>
+                    <td><NumCell value={draft.fgStock[size]} onChange={val=>setFgStock(size,val)} bg={ORDER_MGMT_COLORS.fgStock.bg} /></td>
                   </tr>
                 ))}
                 <tr className="grid-total-row">
                   <td className="stickycol">Total</td>
-                  {style.weeks.map(w=>(<td key={w.id}><NumCell value={sizeSum(w.qty)} editable={false} bold bg={ORDER_MGMT_COLORS.ordered.head} /></td>))}
+                  {draft.weeks.map(w=>(<td key={w.id}><NumCell value={sizeSum(w.qty)} editable={false} bold bg={ORDER_MGMT_COLORS.ordered.head} /></td>))}
                   <td><NumCell value={calc.totals.ordered} editable={false} bold bg={ORDER_MGMT_COLORS.ordered.head} /></td>
                   <td className="col-divider"></td>
-                  {style.pos.map(p=>(<td key={p.id}><NumCell value={sizeSum(p.received)} editable={false} bold bg={ORDER_MGMT_COLORS.poQty.head} /></td>))}
+                  {draft.pos.map(p=>(<td key={p.id}><NumCell value={sizeSum(p.received)} editable={false} bold bg={ORDER_MGMT_COLORS.poQty.head} /></td>))}
                   <td><NumCell value={calc.totals.received} editable={false} bold bg={ORDER_MGMT_COLORS.poQty.head} /></td>
                   <td><NumCell value={calc.totals.balanceToOrder} editable={false} bold color={balColor(calc.totals.balanceToOrder)} /></td>
                   <td><NumCell value={calc.totals.fgStock} editable={false} bold bg={ORDER_MGMT_COLORS.fgStock.head} /></td>
@@ -4289,7 +4724,7 @@ function StyleCard({style,calc,status,open,onToggle,onUpdate,onDelete}){
                   <th className="stickycol lbl">Size</th>
                   <th style={{background:ORDER_MGMT_COLORS.ordered.head}}>Ordered Qty</th>
                   <th className="col-divider"></th>
-                  {style.issues.map(is=>(
+                  {draft.issues.map(is=>(
                     <th key={is.id} style={{background:ORDER_MGMT_COLORS.issued.head}}>
                       <input className="col-head-label" value={is.label} onChange={e=>setIssueLabel(is.id,e.target.value)} />
                       <span className="icon-btn" onClick={()=>removeIssue(is.id)} style={{marginLeft:2}}>✕</span>
@@ -4306,7 +4741,7 @@ function StyleCard({style,calc,status,open,onToggle,onUpdate,onDelete}){
                     <td className="stickycol">{size}</td>
                     <td><NumCell value={calc.orderedTotal[size]} editable={false} bold bg={ORDER_MGMT_COLORS.ordered.bg} /></td>
                     <td className="col-divider"></td>
-                    {style.issues.map(is=>(
+                    {draft.issues.map(is=>(
                       <td key={is.id}><NumCell value={is.qty[size]} onChange={val=>setIssueQty(is.id,size,val)} bg={ORDER_MGMT_COLORS.issued.bg} /></td>
                     ))}
                     <td><NumCell value={calc.issuedTotal[size]} editable={false} bold bg={ORDER_MGMT_COLORS.issued.bg} /></td>
@@ -4318,7 +4753,7 @@ function StyleCard({style,calc,status,open,onToggle,onUpdate,onDelete}){
                   <td className="stickycol">Total</td>
                   <td><NumCell value={calc.totals.ordered} editable={false} bold bg={ORDER_MGMT_COLORS.ordered.head} /></td>
                   <td className="col-divider"></td>
-                  {style.issues.map(is=>(<td key={is.id}><NumCell value={sizeSum(is.qty)} editable={false} bold bg={ORDER_MGMT_COLORS.issued.head} /></td>))}
+                  {draft.issues.map(is=>(<td key={is.id}><NumCell value={sizeSum(is.qty)} editable={false} bold bg={ORDER_MGMT_COLORS.issued.head} /></td>))}
                   <td><NumCell value={calc.totals.issued} editable={false} bold bg={ORDER_MGMT_COLORS.issued.head} /></td>
                   <td><NumCell value={calc.totals.balanceAccStock} editable={false} bold color={balColor(calc.totals.balanceAccStock)} bg={ORDER_MGMT_COLORS.stockBal.head} /></td>
                   <td><NumCell value={calc.totals.needToIssue} editable={false} bold color={balColor(-calc.totals.needToIssue)} bg={ORDER_MGMT_COLORS.needIssue.head} /></td>
@@ -4481,6 +4916,111 @@ function LoginScreen({users, onLogin, onCreateFirstAdmin}){
   );
 }
 
+// Per-user row with its own draft for Role / Admin / Module access — nothing here reaches
+// the shared account list until Save is clicked, same pattern as everywhere else in the app.
+// Password changes keep their own existing explicit Save flow (passed in from the parent),
+// unaffected by this.
+function UserRow({u, currentUser, onChangeRole, onRemoveUser,
+  pwEditId, newPassword, setNewPassword, pwError, startPwEdit, savePwEdit, setPwEditId, setPwError,
+  revealedIds, toggleReveal, expandedId, setExpandedId}){
+  const savedAccess = {role:u.role, isAdmin:!!u.isAdmin, moduleAccess:{...Object.fromEntries(MODULE_LIST.map(m=>[m.key,true])), ...(u.moduleAccess||{})}};
+  const [draft,setDraft] = useState(savedAccess);
+  const [justSaved,setJustSaved] = useState(false);
+  const dirty = JSON.stringify(draft) !== JSON.stringify(savedAccess);
+  const setModuleDraft = (key,checked)=> setDraft(d=>({...d, moduleAccess:{...d.moduleAccess,[key]:checked}}));
+  const save = ()=>{
+    onChangeRole(u.id, {role:draft.role, isAdmin:draft.isAdmin, moduleAccess:draft.moduleAccess});
+    setJustSaved(true); setTimeout(()=>setJustSaved(false),1800);
+  };
+  const discard = ()=> setDraft(savedAccess);
+  const draftModuleSummary = ()=>{
+    if(draft.isAdmin) return 'All modules (admin)';
+    const on = MODULE_LIST.filter(m=>draft.moduleAccess[m.key]!==false).length;
+    if(on===MODULE_LIST.length) return 'All modules';
+    if(on===0) return 'No modules';
+    return `${on} of ${MODULE_LIST.length} modules`;
+  };
+  return (
+    <React.Fragment>
+      <tr>
+        <td style={{display:'flex',alignItems:'center',gap:8}}>
+          <Avatar user={u} size={26} />
+          {u.displayName}{u.id===currentUser.id && <span className="badge-count" style={{marginLeft:6}}>You</span>}
+        </td>
+        <td className="mono">{u.username}</td>
+        <td>
+          {pwEditId===u.id ? (
+            <div style={{display:'flex',alignItems:'center',gap:6}}>
+              <input type="text" autoFocus placeholder="New password" value={newPassword}
+                onChange={e=>setNewPassword(e.target.value)} style={{width:120,fontSize:12}} />
+              <button type="button" className="btn primary" style={{padding:'4px 9px',fontSize:11}} onClick={()=>savePwEdit(u.id)}>Save</button>
+              <button type="button" className="icon-btn" title="Cancel" onClick={()=>{setPwEditId(null); setNewPassword(''); setPwError('');}}>✕</button>
+              {pwError && <span style={{color:'var(--red)',fontSize:11}}>{pwError}</span>}
+            </div>
+          ) : (
+            <div style={{display:'flex',alignItems:'center',gap:6}}>
+              <span className="mono" style={{fontSize:12,minWidth:78,display:'inline-block'}}>
+                {revealedIds.has(u.id) ? (u.passwordPlain || '(reset to view)') : '••••••••'}
+              </span>
+              {u.passwordPlain && (
+                <button type="button" className="icon-btn" title={revealedIds.has(u.id)?'Hide password':'Show password'} onClick={()=>toggleReveal(u.id)}>
+                  <Icon name={revealedIds.has(u.id)?'eyeOff':'eye'} size={14}/>
+                </button>
+              )}
+              <button type="button" className="icon-btn" title="Set a new password" onClick={()=>startPwEdit(u.id)}>
+                <Icon name="edit" size={14}/>
+              </button>
+            </div>
+          )}
+        </td>
+        <td>
+          <select value={draft.role} onChange={e=>setDraft(d=>({...d,role:e.target.value}))}>
+            <option value="editor">Editor</option>
+            <option value="viewer">Viewer</option>
+          </select>
+        </td>
+        <td>
+          <input type="checkbox" checked={draft.isAdmin} onChange={e=>setDraft(d=>({...d,isAdmin:e.target.checked}))} disabled={u.id===currentUser.id} />
+        </td>
+        <td>
+          {draft.isAdmin ? (
+            <span style={{fontSize:12,color:'var(--ink-faint)'}}>{draftModuleSummary()}</span>
+          ) : (
+            <button type="button" className="btn" style={{fontSize:11.5,padding:'4px 10px'}} onClick={()=>setExpandedId(expandedId===u.id?null:u.id)}>
+              {draftModuleSummary()} <Icon name="chevronDown" size={12} style={expandedId===u.id?{transform:'rotate(180deg)'}:undefined}/>
+            </button>
+          )}
+        </td>
+        <td style={{display:'flex',alignItems:'center',gap:6}}>
+          <button type="button" className={"btn"+(dirty?" primary":"")} disabled={!dirty} onClick={save} style={{padding:'4px 10px',fontSize:11}}>Save</button>
+          {dirty && <button type="button" className="btn" onClick={discard} style={{padding:'4px 8px',fontSize:11}}>Discard</button>}
+          {dirty && <span className="acc-kpi-badge amber">● Unsaved</span>}
+          {justSaved && !dirty && <span className="acc-kpi-badge green">✓ Saved</span>}
+          {u.id!==currentUser.id && (
+            <button className="icon-btn" title="Remove user"
+              onClick={()=>{ if(window.confirm(`Remove ${u.displayName} (${u.username})? They will no longer be able to sign in.`)) onRemoveUser(u.id); }}>✕</button>
+          )}
+        </td>
+      </tr>
+      {expandedId===u.id && !draft.isAdmin && (
+        <tr>
+          <td colSpan={7} style={{background:'var(--surface-alt)'}}>
+            <div style={{padding:'10px 4px',display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(190px,1fr))',gap:'6px 14px'}}>
+              {MODULE_LIST.map(m=>(
+                <label key={m.key} style={{display:'flex',alignItems:'center',gap:7,fontSize:12.5}}>
+                  <input type="checkbox" checked={draft.moduleAccess[m.key]!==false}
+                    onChange={e=>setModuleDraft(m.key,e.target.checked)} />
+                  {m.label}
+                </label>
+              ))}
+            </div>
+            {dirty && <div className="foot-note" style={{color:'var(--amber)',padding:'0 4px 8px'}}>Unsaved — click Save in the row above to keep these module changes.</div>}
+          </td>
+        </tr>
+      )}
+    </React.Fragment>
+  );
+}
 function UserManagementPage({users, currentUser, onAddUser, onRemoveUser, onChangeRole, onChangePassword}){
   const [displayName,setDisplayName] = useState('');
   const [username,setUsername] = useState('');
@@ -4578,82 +5118,10 @@ function UserManagementPage({users, currentUser, onAddUser, onRemoveUser, onChan
             <thead><tr><th>Name</th><th>Username</th><th>Password</th><th>Role</th><th>Admin</th><th>Modules</th><th></th></tr></thead>
             <tbody>
               {users.map(u=>(
-                <React.Fragment key={u.id}>
-                <tr>
-                  <td style={{display:'flex',alignItems:'center',gap:8}}>
-                    <Avatar user={u} size={26} />
-                    {u.displayName}{u.id===currentUser.id && <span className="badge-count" style={{marginLeft:6}}>You</span>}
-                  </td>
-                  <td className="mono">{u.username}</td>
-                  <td>
-                    {pwEditId===u.id ? (
-                      <div style={{display:'flex',alignItems:'center',gap:6}}>
-                        <input type="text" autoFocus placeholder="New password" value={newPassword}
-                          onChange={e=>setNewPassword(e.target.value)} style={{width:120,fontSize:12}} />
-                        <button type="button" className="btn primary" style={{padding:'4px 9px',fontSize:11}} onClick={()=>savePwEdit(u.id)}>Save</button>
-                        <button type="button" className="icon-btn" title="Cancel" onClick={()=>{setPwEditId(null); setNewPassword(''); setPwError('');}}>✕</button>
-                        {pwError && <span style={{color:'var(--red)',fontSize:11}}>{pwError}</span>}
-                      </div>
-                    ) : (
-                      <div style={{display:'flex',alignItems:'center',gap:6}}>
-                        <span className="mono" style={{fontSize:12,minWidth:78,display:'inline-block'}}>
-                          {revealedIds.has(u.id) ? (u.passwordPlain || '(reset to view)') : '••••••••'}
-                        </span>
-                        {u.passwordPlain && (
-                          <button type="button" className="icon-btn" title={revealedIds.has(u.id)?'Hide password':'Show password'} onClick={()=>toggleReveal(u.id)}>
-                            <Icon name={revealedIds.has(u.id)?'eyeOff':'eye'} size={14}/>
-                          </button>
-                        )}
-                        <button type="button" className="icon-btn" title="Set a new password" onClick={()=>startPwEdit(u.id)}>
-                          <Icon name="edit" size={14}/>
-                        </button>
-                      </div>
-                    )}
-                  </td>
-                  <td>
-                    <select value={u.role} onChange={e=>onChangeRole(u.id,{role:e.target.value})}>
-                      <option value="editor">Editor</option>
-                      <option value="viewer">Viewer</option>
-                    </select>
-                  </td>
-                  <td>
-                    <input type="checkbox" checked={!!u.isAdmin} onChange={e=>onChangeRole(u.id,{isAdmin:e.target.checked})} disabled={u.id===currentUser.id} />
-                  </td>
-                  <td>
-                    {u.isAdmin ? (
-                      <span style={{fontSize:12,color:'var(--ink-faint)'}}>{moduleSummary(u)}</span>
-                    ) : (
-                      <button type="button" className="btn" style={{fontSize:11.5,padding:'4px 10px'}} onClick={()=>setExpandedId(expandedId===u.id?null:u.id)}>
-                        {moduleSummary(u)} <Icon name="chevronDown" size={12} style={expandedId===u.id?{transform:'rotate(180deg)'}:undefined}/>
-                      </button>
-                    )}
-                  </td>
-                  <td>
-                    {u.id!==currentUser.id && (
-                      <button className="icon-btn" title="Remove user"
-                        onClick={()=>{ if(window.confirm(`Remove ${u.displayName} (${u.username})? They will no longer be able to sign in.`)) onRemoveUser(u.id); }}>✕</button>
-                    )}
-                  </td>
-                </tr>
-                {expandedId===u.id && !u.isAdmin && (
-                  <tr>
-                    <td colSpan={7} style={{background:'var(--surface-alt)'}}>
-                      <div style={{padding:'10px 4px',display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(190px,1fr))',gap:'6px 14px'}}>
-                        {MODULE_LIST.map(m=>{
-                          const acc = accessOf(u);
-                          return (
-                            <label key={m.key} style={{display:'flex',alignItems:'center',gap:7,fontSize:12.5}}>
-                              <input type="checkbox" checked={acc[m.key]!==false}
-                                onChange={e=>toggleUserModule(u,m.key,e.target.checked)} />
-                              {m.label}
-                            </label>
-                          );
-                        })}
-                      </div>
-                    </td>
-                  </tr>
-                )}
-                </React.Fragment>
+                <UserRow key={u.id} u={u} currentUser={currentUser} onChangeRole={onChangeRole} onRemoveUser={onRemoveUser}
+                  pwEditId={pwEditId} newPassword={newPassword} setNewPassword={setNewPassword} pwError={pwError}
+                  startPwEdit={startPwEdit} savePwEdit={savePwEdit} setPwEditId={setPwEditId} setPwError={setPwError}
+                  revealedIds={revealedIds} toggleReveal={toggleReveal} expandedId={expandedId} setExpandedId={setExpandedId} />
               ))}
             </tbody>
           </table>
@@ -4855,8 +5323,10 @@ async function redactPoPdfBytes(arrayBuffer, onProgress){
 
 // Renders one page of a PDF (given as bytes) to a PNG/JPEG data URL for preview
 // or export. dpi controls resolution (96 for on-screen preview, 300 for export).
-async function renderPdfPageToDataUrl(bytes, pageNum, dpi, mime){
-  const doc = await pdfjsLib.getDocument({ data: new Uint8Array(bytes.slice(0)) }).promise;
+async function loadPdfDoc(bytes){
+  return await pdfjsLib.getDocument({ data: new Uint8Array(bytes.slice(0)) }).promise;
+}
+async function renderPdfDocPageToCanvas(doc, pageNum, dpi){
   const page = await doc.getPage(pageNum);
   const scale = dpi/72;
   const viewport = page.getViewport({ scale });
@@ -4866,6 +5336,13 @@ async function renderPdfPageToDataUrl(bytes, pageNum, dpi, mime){
   const ctx = canvas.getContext('2d');
   ctx.fillStyle = '#fff'; ctx.fillRect(0,0,canvas.width,canvas.height);
   await page.render({ canvasContext: ctx, viewport }).promise;
+  return canvas;
+}
+// Single ad-hoc page render (used for on-screen previews) — loads its own document since
+// it's only ever called once at a time, not in a page loop.
+async function renderPdfPageToDataUrl(bytes, pageNum, dpi, mime){
+  const doc = await loadPdfDoc(bytes);
+  const canvas = await renderPdfDocPageToCanvas(doc, pageNum, dpi);
   return { dataUrl: canvas.toDataURL(mime||'image/png', 0.92), canvas, numPages: doc.numPages };
 }
 
@@ -4874,37 +5351,47 @@ async function renderPdfPageToDataUrl(bytes, pageNum, dpi, mime){
 // objects — including the ones still sitting under the white redaction boxes —
 // survive. Unlike drawing a rectangle on the vector PDF, this makes the removed
 // fields genuinely unrecoverable via copy/paste or any text-extraction tool.
+// The source PDF is parsed once and reused across every page — re-parsing per
+// page was the main cost on multi-page files — and pages are encoded as JPEG
+// (much faster than PNG for this kind of content, no visible quality loss).
 async function flattenPdfToRasterBytes(bytes, numPages, dpi, onProgress){
   const outDoc = await PDFLib.PDFDocument.create();
   const usedDpi = dpi || 300;
+  const doc = await loadPdfDoc(bytes);
   for(let p=1; p<=numPages; p++){
-    const { canvas } = await renderPdfPageToDataUrl(bytes, p, usedDpi, 'image/png');
-    const pngDataUrl = canvas.toDataURL('image/png');
-    const pngBytes = Uint8Array.from(atob(pngDataUrl.split(',')[1]), c=>c.charCodeAt(0));
-    const pngImage = await outDoc.embedPng(pngBytes);
+    const canvas = await renderPdfDocPageToCanvas(doc, p, usedDpi);
+    const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.9);
+    const jpegBytes = Uint8Array.from(atob(jpegDataUrl.split(',')[1]), c=>c.charCodeAt(0));
+    const jpegImage = await outDoc.embedJpg(jpegBytes);
     const pageWidthPt = canvas.width * 72 / usedDpi;
     const pageHeightPt = canvas.height * 72 / usedDpi;
     const page = outDoc.addPage([pageWidthPt, pageHeightPt]);
-    page.drawImage(pngImage, { x:0, y:0, width: pageWidthPt, height: pageHeightPt });
+    page.drawImage(jpegImage, { x:0, y:0, width: pageWidthPt, height: pageHeightPt });
     if(onProgress) onProgress(p, numPages);
   }
   return await outDoc.save();
 }
 
-// Same rasterize-and-rebuild approach as flattenPdfToRasterBytes, but for a
-// single page — used when splitting a multi-PO PDF into one file per PO.
-async function flattenSinglePageToRasterBytes(bytes, pageNum, dpi){
+// Same approach, for a single page — used when splitting a multi-PO PDF into one file per
+// PO. Accepts an already-loaded document so a full multi-page split only parses the source
+// PDF once, not once per PO.
+async function flattenSinglePageFromDocToRasterBytes(doc, pageNum, dpi){
   const outDoc = await PDFLib.PDFDocument.create();
   const usedDpi = dpi || 300;
-  const { canvas } = await renderPdfPageToDataUrl(bytes, pageNum, usedDpi, 'image/png');
-  const pngDataUrl = canvas.toDataURL('image/png');
-  const pngBytes = Uint8Array.from(atob(pngDataUrl.split(',')[1]), c=>c.charCodeAt(0));
-  const pngImage = await outDoc.embedPng(pngBytes);
+  const canvas = await renderPdfDocPageToCanvas(doc, pageNum, usedDpi);
+  const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.9);
+  const jpegBytes = Uint8Array.from(atob(jpegDataUrl.split(',')[1]), c=>c.charCodeAt(0));
+  const jpegImage = await outDoc.embedJpg(jpegBytes);
   const pageWidthPt = canvas.width * 72 / usedDpi;
   const pageHeightPt = canvas.height * 72 / usedDpi;
   const page = outDoc.addPage([pageWidthPt, pageHeightPt]);
-  page.drawImage(pngImage, { x:0, y:0, width: pageWidthPt, height: pageHeightPt });
+  page.drawImage(jpegImage, { x:0, y:0, width: pageWidthPt, height: pageHeightPt });
   return await outDoc.save();
+}
+// Ad-hoc single-page wrapper (loads its own document) — kept for any one-off caller.
+async function flattenSinglePageToRasterBytes(bytes, pageNum, dpi){
+  const doc = await loadPdfDoc(bytes);
+  return await flattenSinglePageFromDocToRasterBytes(doc, pageNum, dpi);
 }
 
 function downloadBlob(blob, filename){
@@ -5015,8 +5502,9 @@ function PODocumentEditorPage(){
     try{
       const zip = new JSZip();
       const base = f.name.replace(/\.pdf$/i,'');
+      const doc = await loadPdfDoc(f.redactedBytes);
       for(let p=1;p<=f.numPages;p++){
-        const { canvas } = await renderPdfPageToDataUrl(f.redactedBytes, p, 300, mime);
+        const canvas = await renderPdfDocPageToCanvas(doc, p, 300);
         const blob = await new Promise(res=>canvas.toBlob(res, mime, 0.95));
         const pageLabel = String(p).padStart(2,'0');
         if(f.numPages===1){
@@ -5034,27 +5522,30 @@ function PODocumentEditorPage(){
 
   // Splits a multi-PO PDF into one flattened (text-removed) PDF per page/PO,
   // naming each file after the PO number printed at the top of that sheet
-  // (e.g. "n° 1130224857" → PO_1130224857_Internal.pdf). Falls back to the
-  // page number for any sheet where a PO number couldn't be detected. A
-  // single-page file downloads directly; multi-page files are bundled as a zip.
+  // (e.g. "n° 1130224857" → 1130224857.pdf). Falls back to the page number
+  // for any sheet where a PO number couldn't be detected. A single-page file
+  // downloads directly; multi-page files are bundled as a zip. The source PDF
+  // is parsed once and reused for every page — this was the main slowdown on
+  // files with many POs, since each page previously re-parsed the whole document.
   async function downloadEachPo(f){
     setExporting(true);
     try{
       const zip = new JSZip();
       const base = f.name.replace(/\.pdf$/i,'');
       const usedNames = new Set();
+      const doc = await loadPdfDoc(f.redactedBytes);
       for(let p=1;p<=f.numPages;p++){
-        const bytes = await flattenSinglePageToRasterBytes(f.redactedBytes, p, 300);
+        const bytes = await flattenSinglePageFromDocToRasterBytes(doc, p, 300);
         const blob = new Blob([bytes], { type:'application/pdf' });
         const poNum = f.poNumbers && f.poNumbers[p-1];
-        const nameBase = poNum ? ('PO_'+poNum) : (base+'_Page'+String(p).padStart(2,'0'));
+        const nameBase = poNum ? poNum : (base+'_Page'+String(p).padStart(2,'0'));
         let name = nameBase, n = 2;
         while(usedNames.has(name)){ name = nameBase+'_'+n; n++; } // guard against duplicate PO numbers
         usedNames.add(name);
         if(f.numPages===1){
-          downloadBlob(blob, name+'_Internal.pdf');
+          downloadBlob(blob, name+'.pdf');
         }else{
-          zip.file(name+'_Internal.pdf', blob);
+          zip.file(name+'.pdf', blob);
         }
       }
       if(f.numPages>1){
@@ -5179,7 +5670,7 @@ function PODocumentEditorPage(){
             {selected.numPages>1 && (
               <div className="foot-note" style={{marginTop:6}}>
                 <b>Each PO (ZIP)</b> splits a multi-PO file into one PDF per page, reading the PO number automatically
-                from the top of each sheet (the "n° ..." line) to name the file — e.g. <span className="mono">PO_1130224857_Internal.pdf</span>.
+                from the top of each sheet (the "n° ..." line) to name the file — e.g. <span className="mono">1130224857.pdf</span>.
                 A page whose PO number can't be detected falls back to a page-number filename.
               </div>
             )}
@@ -5254,6 +5745,8 @@ export default function App(){
   const [shipmentDetailsBatches,setShipmentDetailsBatches] = useState([]);
   const [parsingShipmentPlan,setParsingShipmentPlan] = useState(false);
   const [parsingShipmentDetails,setParsingShipmentDetails] = useState(false);
+  const [parsingShipmentDetailsSheet,setParsingShipmentDetailsSheet] = useState(false);
+  const [shipmentDetailsSheetError,setShipmentDetailsSheetError] = useState(null);
 
   useEffect(()=>{
     (async ()=>{
@@ -5458,6 +5951,8 @@ export default function App(){
               department:row.department||existing.department, cc:row.cc||existing.cc,
               selectionQty: row.selectionQty || existing.selectionQty,
               r3Code: row.r3Code || existing.r3Code,
+              yarnSmtPct: row.yarnSmtPct || existing.yarnSmtPct, fabricGreigeSmtPct: row.fabricGreigeSmtPct || existing.fabricGreigeSmtPct,
+              fabricDyingSmtPct: row.fabricDyingSmtPct || existing.fabricDyingSmtPct, accSmtPct: row.accSmtPct || existing.accSmtPct,
             });
           } else {
             const id = 'st_'+Date.now()+'_'+row.styleNo;
@@ -5466,6 +5961,7 @@ export default function App(){
               ...blankStyleMeta(),
               season:row.season, buyer:row.buyer, color:row.color, factory:row.factory, country:row.country,
               company:row.company, supplier:row.supplier, department:row.department, cc:row.cc,
+              yarnSmtPct:row.yarnSmtPct, fabricGreigeSmtPct:row.fabricGreigeSmtPct, fabricDyingSmtPct:row.fabricDyingSmtPct, accSmtPct:row.accSmtPct,
               weeks:[{id:'wk_'+Date.now(),label:'WK01',qty:zeroSizes()}], pos:[], fgStock:zeroSizes(), issues:[],
             };
           }
@@ -5478,7 +5974,7 @@ export default function App(){
         const version = prev.filter(b=>b.season===season).length + 1;
         const next=[...prev,{
           id:batch.id, fileName:batch.fileName, uploadedAt:batch.uploadedAt, rowCount:batch.rowCount,
-          season, version, uploadedBy: currentUser? currentUser.displayName : '', remarks: remarks||'',
+          season, version, uploadedBy: currentUser? currentUser.displayName : '', remarks: remarks||'', rows: batch.rows,
         }];
         storeSet('selection-batches',next,true);
         return next;
@@ -5686,6 +6182,66 @@ export default function App(){
     }catch(e){ alert('Could not parse this file: '+e.message); }
     setParsingShipmentDetails(false);
   },[]);
+  // Shipment Details — import directly from a Google Sheet link instead of downloading and
+  // re-uploading a file. Same 3-step fetch strategy already proven for shipment booking:
+  // try a published CSV link as-is, then the full-workbook export link, then Google's
+  // Visualization API (most reliable for cross-origin access, but only one tab per call).
+  const handleShipmentDetailsSheetImport = useCallback(async (url, sheetNameFilter, weekDate)=>{
+    setParsingShipmentDetailsSheet(true);
+    setShipmentDetailsSheetError(null);
+    try{
+      let batch = null;
+
+      if(/output=csv|\/pub\b/.test(url)){
+        try{
+          const res = await fetch(url);
+          if(res.ok){
+            const csvText = await res.text();
+            if(!/^\s*<!doctype html|^\s*<html/i.test(csvText)){
+              const wb = XLSX.read(csvText, {type:'string'});
+              batch = parseShipmentDetailsWorkbook(wb, `Google Sheet — ${new Date().toLocaleDateString()}`, weekDate);
+            }
+          }
+        }catch(e0){ /* fall through */ }
+      }
+
+      if(!batch){
+        try{
+          const res = await fetch(googleSheetXlsxExportUrl(url));
+          if(res.ok){
+            const buf = await res.arrayBuffer();
+            const wb = XLSX.read(buf, {type:'array', cellDates:true});
+            if(sheetNameFilter){
+              const match = wb.SheetNames.filter(nm=>nm.toLowerCase().includes(sheetNameFilter.toLowerCase()));
+              if(match.length) wb.SheetNames = match;
+            }
+            batch = parseShipmentDetailsWorkbook(wb, `Google Sheet — ${new Date().toLocaleDateString()}`, weekDate);
+          }
+        }catch(e1){ /* fall through to attempt 2 below — usually a CORS block on the export link */ }
+      }
+
+      if(!batch){
+        const gidMatch = url.match(/[?#&]gid=(\d+)/);
+        const gvizUrl = googleSheetGvizCsvUrl(url, sheetNameFilter, gidMatch? gidMatch[1] : null);
+        if(!gvizUrl) throw new Error('That doesn\'t look like a Google Sheets link.');
+        let res;
+        try{ res = await fetch(gvizUrl); }
+        catch(e2){ throw new Error('Could not reach that sheet at all. This almost always means it isn\'t actually shared as "Anyone with the link can view" yet — open the sheet, click Share, and check the General access setting is not "Restricted".'); }
+        if(!res.ok) throw new Error(`Google Sheets returned an error (status ${res.status}). Check the link is shared as "Anyone with the link can view".`);
+        const csvText = await res.text();
+        if(/^\s*<!doctype html|^\s*<html/i.test(csvText)) throw new Error('That link returned a sign-in page, not data — the sheet needs to be shared as "Anyone with the link can view".');
+        const wb = XLSX.read(csvText, {type:'string'});
+        batch = parseShipmentDetailsWorkbook(wb, `Google Sheet — ${new Date().toLocaleDateString()}`, weekDate);
+      }
+
+      setShipmentDetailsBatches(prev=>{
+        const next=[...prev,batch];
+        storeSet('shipmentdetails-batches',next,true);
+        return next;
+      });
+    }catch(e){ setShipmentDetailsSheetError(e.message); }
+    setParsingShipmentDetailsSheet(false);
+  },[]);
   const handleDeleteShipmentPlanBatch = useCallback((id)=>{
     setShipmentPlanBatches(prev=>{
       const next = prev.filter(b=>b.id!==id);
@@ -5884,6 +6440,7 @@ export default function App(){
           {page==='shipmentperf' && <ShipmentPerformancePage
             planBatches={shipmentPlanBatches} onPlanUpload={handleShipmentPlanUpload} parsingPlan={parsingShipmentPlan} onDeletePlan={handleDeleteShipmentPlanBatch}
             detailsBatches={shipmentDetailsBatches} onDetailsUpload={handleShipmentDetailsUpload} parsingDetails={parsingShipmentDetails} onDeleteDetails={handleDeleteShipmentDetailsBatch}
+            onDetailsSheetImport={handleShipmentDetailsSheetImport} parsingDetailsSheet={parsingShipmentDetailsSheet} detailsSheetError={shipmentDetailsSheetError}
           />}
           {page==='podocedit' && <PODocumentEditorPage />}
           {page==='users' && (currentUser.isAdmin
