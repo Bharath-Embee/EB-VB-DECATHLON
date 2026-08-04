@@ -5176,6 +5176,23 @@ function itemHeight(it){
 // the page down, and matches the first line that looks like "n° <digits>" —
 // tolerant of the degree sign being rendered as °, º, or a stray "o"/"0", and of
 // the label and number sitting in one text run or being split across several.
+// Detects the "Page X/Y" marker Decathlon prints near the top of every PO sheet. Returns
+// {page, total} or null. Used to identify and drop continuation pages (page 2 of 2, etc.) —
+// on Decathlon's PO template these only ever carry a boilerplate comments block, never any of
+// the actual order data, which all lives on page 1. Some of this template's pages interleave
+// unrelated text between the "X" and "/Y" parts of the marker (e.g. "Page1 / n° 2" — the "n°"
+// belongs to a different field that reflows in between), so the whole page is searched as one
+// blob with a gap-tolerant pattern rather than requiring the marker to sit cleanly on one line.
+function extractPageOfTotal(items){
+  const usable = (items||[]).filter(it=>(it.str||'').trim().length>0 && it.transform);
+  if(usable.length===0) return null;
+  const sorted = usable.slice().sort((a,b)=> b.transform[5]-a.transform[5] || a.transform[4]-b.transform[4]);
+  const blob = sorted.map(it=>it.str).join(' ').replace(/\s+/g,' ');
+  const m = blob.match(/page\s*(\d+)[^\d/]{0,15}\/[^\d]{0,10}(\d+)/i);
+  if(m) return { page:Number(m[1]), total:Number(m[2]) };
+  return null;
+}
+
 function extractPoNumber(items, pageHeight){
   const usable = (items||[]).filter(it=>(it.str||'').trim().length>0 && it.transform);
   if(usable.length===0) return null;
@@ -5267,17 +5284,21 @@ function computeRedactionRects(items, pageWidth, pageHeight){
     }
   }
 
-  // 3) Everything from "PO Comment" down to the bottom margin (comments, the
-  //    "thanks to confirm…" note, order number, contact, department, invoice
-  //    address, VAT number, signature lines, fax id) — border kept intact.
-  //    The left edge is sized to the actual leftmost text in this band rather
-  //    than a fixed guessed margin — some of these lines start further left
-  //    than marginX, and a fixed edge left the first letter or two of "PO
-  //    Comment", "Please…", "Order Number", "Contact", "Supplier Signature",
-  //    "fax id" etc. peeking out past the box.
-  if(poComment){
+  // 3) Everything from "PO Comment" (page 2, if present) or "Please repeat on
+  //    your invoice..." (page 1 — this footer repeats there too, but without a
+  //    "PO Comment" line above it, so that anchor alone missed it) down to the
+  //    bottom margin: comments, the "thanks to confirm…" note, order number,
+  //    contact name/email, department, invoice address, VAT number, signature
+  //    lines, fax id. Border kept intact. The left edge is sized to the actual
+  //    leftmost text in this band rather than a fixed guessed margin — some of
+  //    these lines start further left than marginX, and a fixed edge left the
+  //    first letter or two of "PO Comment", "Please…", "Order Number",
+  //    "Contact", "Supplier Signature", "fax id" etc. peeking out past the box.
+  const repeatNote = findItem(items, 'please repeat');
+  const footerAnchor = poComment || repeatNote;
+  if(footerAnchor){
     const bottomMargin = 14;
-    const topY = poComment.transform[5] + itemHeight(poComment) + 4;
+    const topY = footerAnchor.transform[5] + itemHeight(footerAnchor) + 4;
     if(topY > bottomMargin){
       const bandItems = items.filter(it=>{
         const y = it.transform[5];
@@ -5303,6 +5324,7 @@ async function redactPoPdfBytes(arrayBuffer, onProgress){
   const numPages = pdfjsDoc.numPages;
   const pdfLibPages = pdfLibDoc.getPages();
   const poNumbers = [];
+  const isContinuationPage = [];
 
   for(let i=0;i<numPages;i++){
     const pjsPage = await pdfjsDoc.getPage(i+1);
@@ -5310,6 +5332,8 @@ async function redactPoPdfBytes(arrayBuffer, onProgress){
     const textContent = await pjsPage.getTextContent();
     const rects = computeRedactionRects(textContent.items, viewport.width, viewport.height);
     poNumbers.push(extractPoNumber(textContent.items, viewport.height));
+    const pageOf = extractPageOfTotal(textContent.items);
+    isContinuationPage.push(!!(pageOf && pageOf.page>1));
     const libPage = pdfLibPages[i];
     rects.forEach(r=>{
       libPage.drawRectangle({ x:r.x, y:r.y, width:r.width, height:r.height, color: PDFLib.rgb(1,1,1) });
@@ -5318,7 +5342,7 @@ async function redactPoPdfBytes(arrayBuffer, onProgress){
   }
 
   const redactedBytes = await pdfLibDoc.save();
-  return { redactedBytes, numPages, poNumbers };
+  return { redactedBytes, numPages, poNumbers, isContinuationPage };
 }
 
 // Renders one page of a PDF (given as bytes) to a PNG/JPEG data URL for preview
@@ -5351,22 +5375,30 @@ async function renderPdfPageToDataUrl(bytes, pageNum, dpi, mime){
 // objects — including the ones still sitting under the white redaction boxes —
 // survive. Unlike drawing a rectangle on the vector PDF, this makes the removed
 // fields genuinely unrecoverable via copy/paste or any text-extraction tool.
-// The source PDF is parsed once and reused across every page — re-parsing per
-// page was the main cost on multi-page files — and pages are encoded as JPEG
-// (much faster than PNG for this kind of content, no visible quality loss).
-async function flattenPdfToRasterBytes(bytes, numPages, dpi, onProgress){
+// The source PDF is parsed once and reused across every page — re-parsing per page was the
+// real cost on multi-page files, and fixing that alone gives most of the speedup. Pages are
+// encoded as PNG (not JPEG) — JPEG's block-based compression visibly breaks up thin table
+// borders and hairlines, which is unacceptable for a document like this; PNG stays lossless
+// and, for flat black-on-white content like a table, compresses efficiently anyway.
+async function flattenPdfToRasterBytes(bytes, numPages, dpi, onProgress, isContinuationPage, poNumbers){
   const outDoc = await PDFLib.PDFDocument.create();
   const usedDpi = dpi || 300;
   const doc = await loadPdfDoc(bytes);
+  let prevPoNum = null;
   for(let p=1; p<=numPages; p++){
+    const poNum = poNumbers && poNumbers[p-1];
+    const markedContinuation = !!(isContinuationPage && isContinuationPage[p-1]);
+    const matchesPrevPoNum = !!(poNum && poNum===prevPoNum);
+    if(poNum) prevPoNum = poNum;
+    if(markedContinuation || matchesPrevPoNum){ if(onProgress) onProgress(p, numPages); continue; } // page 2+ of a PO — Decathlon's template only puts data on page 1
     const canvas = await renderPdfDocPageToCanvas(doc, p, usedDpi);
-    const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.9);
-    const jpegBytes = Uint8Array.from(atob(jpegDataUrl.split(',')[1]), c=>c.charCodeAt(0));
-    const jpegImage = await outDoc.embedJpg(jpegBytes);
+    const pngDataUrl = canvas.toDataURL('image/png');
+    const pngBytes = Uint8Array.from(atob(pngDataUrl.split(',')[1]), c=>c.charCodeAt(0));
+    const pngImage = await outDoc.embedPng(pngBytes);
     const pageWidthPt = canvas.width * 72 / usedDpi;
     const pageHeightPt = canvas.height * 72 / usedDpi;
     const page = outDoc.addPage([pageWidthPt, pageHeightPt]);
-    page.drawImage(jpegImage, { x:0, y:0, width: pageWidthPt, height: pageHeightPt });
+    page.drawImage(pngImage, { x:0, y:0, width: pageWidthPt, height: pageHeightPt });
     if(onProgress) onProgress(p, numPages);
   }
   return await outDoc.save();
@@ -5379,13 +5411,13 @@ async function flattenSinglePageFromDocToRasterBytes(doc, pageNum, dpi){
   const outDoc = await PDFLib.PDFDocument.create();
   const usedDpi = dpi || 300;
   const canvas = await renderPdfDocPageToCanvas(doc, pageNum, usedDpi);
-  const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.9);
-  const jpegBytes = Uint8Array.from(atob(jpegDataUrl.split(',')[1]), c=>c.charCodeAt(0));
-  const jpegImage = await outDoc.embedJpg(jpegBytes);
+  const pngDataUrl = canvas.toDataURL('image/png');
+  const pngBytes = Uint8Array.from(atob(pngDataUrl.split(',')[1]), c=>c.charCodeAt(0));
+  const pngImage = await outDoc.embedPng(pngBytes);
   const pageWidthPt = canvas.width * 72 / usedDpi;
   const pageHeightPt = canvas.height * 72 / usedDpi;
   const page = outDoc.addPage([pageWidthPt, pageHeightPt]);
-  page.drawImage(jpegImage, { x:0, y:0, width: pageWidthPt, height: pageHeightPt });
+  page.drawImage(pngImage, { x:0, y:0, width: pageWidthPt, height: pageHeightPt });
   return await outDoc.save();
 }
 // Ad-hoc single-page wrapper (loads its own document) — kept for any one-off caller.
@@ -5423,7 +5455,7 @@ function PODocumentEditorPage(){
       id: 'pod_'+Date.now()+'_'+Math.random().toString(36).slice(2,8),
       name: f.name, size: f.size, file: f,
       status:'queued', progressDone:0, progressTotal:0, numPages:null,
-      originalBytes:null, redactedBytes:null, poNumbers:null, error:null,
+      originalBytes:null, redactedBytes:null, poNumbers:null, isContinuationPage:null, error:null,
     }));
     setFiles(prev=>[...prev, ...entries]);
     if(!selectedId && entries.length) setSelectedId(entries[0].id);
@@ -5438,10 +5470,10 @@ function PODocumentEditorPage(){
           setFiles(prev=>prev.map(x=>x.id===f.id?{...x,status:'processing'}:x));
           try{
             const buf = await f.file.arrayBuffer();
-            const { redactedBytes, numPages, poNumbers } = await redactPoPdfBytes(buf, (done,total)=>{
+            const { redactedBytes, numPages, poNumbers, isContinuationPage } = await redactPoPdfBytes(buf, (done,total)=>{
               setFiles(prev=>prev.map(x=>x.id===f.id?{...x,progressDone:done,progressTotal:total,numPages:total}:x));
             });
-            setFiles(prev=>prev.map(x=>x.id===f.id?{...x,status:'done',originalBytes:buf,redactedBytes,numPages,poNumbers}:x));
+            setFiles(prev=>prev.map(x=>x.id===f.id?{...x,status:'done',originalBytes:buf,redactedBytes,numPages,poNumbers,isContinuationPage}:x));
           }catch(e){
             console.error('PO PDF redaction failed', e);
             setFiles(prev=>prev.map(x=>x.id===f.id?{...x,status:'error',error:(e&&e.message)||'Failed to process'}:x));
@@ -5489,7 +5521,7 @@ function PODocumentEditorPage(){
       // extraction. Rebuilding the PDF from page images removes that text
       // layer entirely, so this is the version that's actually safe to
       // label "_Internal" and share.
-      const flattenedBytes = await flattenPdfToRasterBytes(f.redactedBytes, f.numPages, 300);
+      const flattenedBytes = await flattenPdfToRasterBytes(f.redactedBytes, f.numPages, 300, null, f.isContinuationPage, f.poNumbers);
       const blob = new Blob([flattenedBytes], { type:'application/pdf' });
       downloadBlob(blob, f.name.replace(/\.pdf$/i,'')+'_Internal.pdf');
     } finally {
@@ -5503,30 +5535,44 @@ function PODocumentEditorPage(){
       const zip = new JSZip();
       const base = f.name.replace(/\.pdf$/i,'');
       const doc = await loadPdfDoc(f.redactedBytes);
+      let prevPoNum = null;
+      let exportedCount = 0;
       for(let p=1;p<=f.numPages;p++){
+        const poNum = f.poNumbers && f.poNumbers[p-1];
+        // Either signal firing is enough to treat this as a continuation page: the explicit
+        // "Page X/Y" marker Decathlon prints on the sheet, or (as a second, independent check)
+        // this page's PO number simply repeating the previous page's.
+        const markedContinuation = !!(f.isContinuationPage && f.isContinuationPage[p-1]);
+        const matchesPrevPoNum = !!(poNum && poNum===prevPoNum);
+        if(poNum) prevPoNum = poNum;
+        if(markedContinuation || matchesPrevPoNum) continue; // page 2+ of a PO — Decathlon's template only puts data on page 1
+
         const canvas = await renderPdfDocPageToCanvas(doc, p, 300);
         const blob = await new Promise(res=>canvas.toBlob(res, mime, 0.95));
         const pageLabel = String(p).padStart(2,'0');
+        exportedCount++;
         if(f.numPages===1){
           downloadBlob(blob, base+'_Page'+pageLabel+'.'+ext);
         }else{
           zip.file(base+'_Page'+pageLabel+'.'+ext, blob);
         }
       }
-      if(f.numPages>1){
+      if(f.numPages>1 && exportedCount>0){
         const zipBlob = await zip.generateAsync({ type:'blob' });
         downloadBlob(zipBlob, base+'_'+ext.toUpperCase()+'.zip');
       }
     } finally { setExporting(false); }
   }
 
-  // Splits a multi-PO PDF into one flattened (text-removed) PDF per page/PO,
-  // naming each file after the PO number printed at the top of that sheet
-  // (e.g. "n° 1130224857" → 1130224857.pdf). Falls back to the page number
-  // for any sheet where a PO number couldn't be detected. A single-page file
-  // downloads directly; multi-page files are bundled as a zip. The source PDF
-  // is parsed once and reused for every page — this was the main slowdown on
-  // files with many POs, since each page previously re-parsed the whole document.
+  // Splits a multi-PO PDF into one flattened (text-removed) PDF per PO, naming each file
+  // after the PO number printed at the top of that sheet (e.g. "n° 1130224857" →
+  // 1130224857.pdf). Falls back to the page number for any sheet where a PO number
+  // couldn't be detected. Decathlon POs only carry real line-item data on page 1 — when a
+  // PO runs to a second page (e.g. "Page 2/2", just comments/signature blocks), that page
+  // repeats the same PO number in its header, so it's recognised as a continuation of the
+  // previous page's PO and skipped entirely, keeping only page 1 per PO. A single-page
+  // file downloads directly; multi-page files are bundled as a zip. The source PDF is
+  // parsed once and reused for every page.
   async function downloadEachPo(f){
     setExporting(true);
     try{
@@ -5534,10 +5580,19 @@ function PODocumentEditorPage(){
       const base = f.name.replace(/\.pdf$/i,'');
       const usedNames = new Set();
       const doc = await loadPdfDoc(f.redactedBytes);
+      let prevPoNum = null;
       for(let p=1;p<=f.numPages;p++){
+        const poNum = f.poNumbers && f.poNumbers[p-1];
+        // Either signal firing is enough to treat this as a continuation page: the explicit
+        // "Page X/Y" marker Decathlon prints on the sheet, or (as a second, independent check)
+        // this page's PO number simply repeating the previous page's.
+        const markedContinuation = !!(f.isContinuationPage && f.isContinuationPage[p-1]);
+        const matchesPrevPoNum = !!(poNum && poNum===prevPoNum);
+        if(poNum) prevPoNum = poNum;
+        if(markedContinuation || matchesPrevPoNum) continue; // page 2+ of a PO — Decathlon's template only puts data on page 1
+
         const bytes = await flattenSinglePageFromDocToRasterBytes(doc, p, 300);
         const blob = new Blob([bytes], { type:'application/pdf' });
-        const poNum = f.poNumbers && f.poNumbers[p-1];
         const nameBase = poNum ? poNum : (base+'_Page'+String(p).padStart(2,'0'));
         let name = nameBase, n = 2;
         while(usedNames.has(name)){ name = nameBase+'_'+n; n++; } // guard against duplicate PO numbers
@@ -5548,7 +5603,7 @@ function PODocumentEditorPage(){
           zip.file(name+'.pdf', blob);
         }
       }
-      if(f.numPages>1){
+      if(zip.file(/.*/).length>0){
         const zipBlob = await zip.generateAsync({ type:'blob' });
         downloadBlob(zipBlob, base+'_PerPO.zip');
       }
@@ -5671,6 +5726,7 @@ function PODocumentEditorPage(){
               <div className="foot-note" style={{marginTop:6}}>
                 <b>Each PO (ZIP)</b> splits a multi-PO file into one PDF per page, reading the PO number automatically
                 from the top of each sheet (the "n° ..." line) to name the file — e.g. <span className="mono">1130224857.pdf</span>.
+                If a PO runs to a second page (e.g. a comments/signature page with no line items), that page is skipped automatically — only page 1 of each PO is kept.
                 A page whose PO number can't be detected falls back to a page-number filename.
               </div>
             )}
